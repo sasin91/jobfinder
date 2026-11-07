@@ -416,6 +416,18 @@ pub fn standard_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A button with an accent border while game mode is active.
+pub fn game_mode_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = standard_button(theme, status);
+        if active {
+            style.border.color = colors(theme).accent;
+            style.border.width = 2.0;
+        }
+        style
+    }
+}
+
 /// A sidebar item, or a row that opens something: no face until the pointer is on it.
 pub fn subtle_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {

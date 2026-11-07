@@ -38,7 +38,7 @@ use std::time::Duration;
 use iced::futures::Stream;
 use iced::theme::Mode;
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Column, Row, button, column, container, row, scrollable, space, stack, text};
+use iced::widget::{Column, Row, button, column, container, row, scrollable, space, stack, text, tooltip};
 use iced::{Center, Element, Fill, Size, Task};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -874,7 +874,6 @@ const STRIP_SIZE: Size = Size::new(3.0, 16.0);
 /// The app's name and its screens, as Windows 11's Settings has them.
 fn sidebar(shell: &Shell) -> Element<'static, Message> {
     let current = shell.screen;
-    let manual = shell.context.game_mode.manual();
     column![
         container(text(TITLE).font(style::title_font()).size(style::SECTION_SIZE)).padding([8.0, 12.0]),
         nav_item("Match", Screen::Match, current),
@@ -885,22 +884,39 @@ fn sidebar(shell: &Shell) -> Element<'static, Message> {
         nav_item("Task manager", Screen::TaskManager, current),
         nav_item("Settings", Screen::Settings, current),
         space().height(Fill),
-        button(
-            text(if manual {
-                "End manual game mode"
-            } else {
-                "Enable game mode"
-            })
-            .size(style::BODY_SIZE)
-        )
-        .width(Fill)
-        .padding([8.0, 8.0])
-        .style(style::subtle_button(manual))
-        .on_press(Message::ToggleGameMode),
+        game_mode_button(shell.context.game_mode.manual(), shell.detected_game.is_some()),
     ]
     .spacing(4)
     .padding(PADDING / 2.0)
     .width(SIDEBAR_WIDTH)
+    .into()
+}
+
+fn game_mode_button(manual: bool, detected: bool) -> Element<'static, Message> {
+    let (label, hint) = match (manual, detected) {
+        (true, _) => ("End manual game mode", "Return to automatic game detection."),
+        (false, true) => (
+            "Keep game mode on",
+            "Game mode is on automatically. Click to keep it on after the game closes.",
+        ),
+        (false, false) => (
+            "Enable game mode",
+            "Free GPU memory when JobFinder’s local model is idle. Job scans use a saved cloud key or wait until game mode ends.",
+        ),
+    };
+    let control = button(text(label).size(style::BODY_SIZE))
+        .width(Fill)
+        .padding(8)
+        .style(style::game_mode_button(manual || detected))
+        .on_press(Message::ToggleGameMode);
+    tooltip(
+        control,
+        text(hint).size(style::CAPTION_SIZE).width(260),
+        tooltip::Position::Right,
+    )
+    .gap(8)
+    .padding(10)
+    .style(style::card)
     .into()
 }
 
