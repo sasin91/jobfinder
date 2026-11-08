@@ -24,6 +24,8 @@
   const ANCESTOR_STEPS = 6;
   // How many elements before a field (or its parents) may hold its question.
   const SIBLING_STEPS = 3;
+  // Generic drop-zone prompts can sit between the input and the upload's heading.
+  const UPLOAD_PROMPT = /^(?:(?:tilføj fil|træk fil hertil|add (?:a )?file|drag (?:a )?file here)[\s.:…]*)+$/iu;
   // Longest question text sent, in characters.
   const LONGEST_TEXT = 600;
   // Input types that are no question to answer.
@@ -36,15 +38,18 @@
 
   const picked = window.__jobfinderForm;
   if (!picked?.id) return;
+  delete window.__jobfinderForm;
+  const page = picked.document ?? document;
+  if (!page.defaultView) return;
   // The same page filled again: the box from last time goes first.
-  document.getElementById(ROOT_ID)?.remove();
-  run(picked);
+  page.getElementById(ROOT_ID)?.remove();
+  run(picked, page);
 
-  async function run(match) {
-    const box = panel(match);
+  async function run(match, page) {
+    const box = panel(match, page);
     let fields;
     try {
-      fields = readFields();
+      fields = readFields(page, match.form);
     } catch (error) {
       box.line(`Couldn't read the form: ${error.message}`, "miss");
       box.done();
@@ -58,7 +63,7 @@
     box.status(`Asking JobFinder about ${fields.list.length} field${fields.list.length === 1 ? "" : "s"}… (the questions can take a minute)`);
     let answered;
     try {
-      answered = await ask({ type: "application_form", id: match.id, fields: fields.list.map(({ element, elements, initialState, ...field }) => field) });
+      answered = await ask({ type: "application_form", id: match.id, fields: fields.list.map(({ element, elements, frame, initialState, ...field }) => field) });
     } catch (error) {
       box.line(error.message, "miss");
       box.done();
@@ -66,12 +71,14 @@
     }
     const byKey = new Map(fields.list.map((field) => [field.key, field]));
     for (const answer of answered.answers) {
+      if (!box.active()) return;
       const field = byKey.get(answer.key);
       if (!field) continue;
       try {
         if (answer.file) {
           box.status(`Getting the PDF for "${named(field)}"…`);
           const pdf = await ask({ type: "pdf", id: match.id, kind: answer.file });
+          if (!box.active()) return;
           requireUnchanged(field);
           attach(field.element, pdf);
           mark(field, FILLED_OUTLINE);
@@ -101,11 +108,12 @@
   // The fields to fill: one per input, text box and drop-down, one per
   // group of radio buttons or checkboxes sharing a name. Each element gets
   // data-jobfinder-key, which the answers come back by.
-  function readFields() {
+  function readFields(page = document, form) {
     const list = [];
     const groups = new Map();
     let kept = 0;
-    const controls = [...document.querySelectorAll("input, textarea, select")].filter((element) => !element.closest(`#${ROOT_ID}`));
+    const controls = [...page.querySelectorAll("input, textarea, select")].filter((element) =>
+      (form === undefined || element.form === form) && !element.closest(`#${ROOT_ID}`));
     for (const element of controls) {
       const type = (element.getAttribute("type") ?? "").toLowerCase();
       if (element.tagName === "INPUT" && NOT_FIELDS.includes(type)) continue;
@@ -116,7 +124,7 @@
           kept++;
           continue;
         }
-        list.push(field(element, "file", `${labelOf(element)} ${questionNear(element)}`));
+        list.push(field(element, "file", `${labelOf(element)} ${questionNear(element, UPLOAD_PROMPT)}`));
         continue;
       }
       const choice = type === "radio" || type === "checkbox";
@@ -124,7 +132,7 @@
       const seen = choice ? shown(element) || shown(element.labels?.[0]) || shown(element.parentElement) : shown(element);
       if (!seen || element.readOnly) continue;
       if (choice && element.name) {
-        const name = `${element.form ? [...document.forms].indexOf(element.form) : "-"}:${type}:${element.name}`;
+        const name = `${element.form ? [...page.forms].indexOf(element.form) : "-"}:${type}:${element.name}`;
         if (!groups.has(name)) groups.set(name, []);
         groups.get(name).push(element);
         continue;
@@ -170,6 +178,20 @@
       for (const element of elements) element.dataset.jobfinderKey = group.key;
       list.push(group);
     }
+    for (const frame of page.querySelectorAll("iframe[title]")) {
+      const owner = frame.closest("form");
+      if (!owner || (form !== undefined && owner !== form) || !shown(frame)) continue;
+      const uploads = frame.contentDocument?.querySelectorAll('input[type="file"]');
+      if (uploads?.length !== 1 || uploads[0].disabled) continue;
+      const element = uploads[0];
+      if (element.files?.length || uploadedFiles(frame)) {
+        kept++;
+        continue;
+      }
+      const upload = field(element, "file", frame.title);
+      upload.frame = frame;
+      list.push(upload);
+    }
     for (const field of list) field.initialState = fieldState(field);
     return { list, kept };
   }
@@ -184,7 +206,8 @@
   }
 
   function shown(element) {
-    return Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== "hidden");
+    return Boolean(element && element.getClientRects().length &&
+      (element.ownerDocument?.defaultView ?? window).getComputedStyle(element).visibility !== "hidden");
   }
 
   function text(node) {
@@ -209,25 +232,31 @@
   function labelOf(element) {
     const parts = [...(element.labels ?? [])].map(text);
     const by = element.getAttribute("aria-labelledby");
-    if (by) parts.push(by.split(/\s+/).map((id) => text(document.getElementById(id))).join(" "));
+    if (by) parts.push(by.split(/\s+/).map((id) => text(element.ownerDocument.getElementById(id))).join(" "));
     parts.push(element.getAttribute("aria-label") ?? "");
     return parts.filter(Boolean).join(" ").trim();
   }
 
   // The text just before the field or one of its parents: a question shown
   // above the box without a <label>, or an upload's heading.
-  function questionNear(element) {
+  function questionNear(element, skip) {
+    let fallback = "";
     let node = element;
-    for (let step = 0; step < ANCESTOR_STEPS && node && node !== document.body; step++) {
+    for (let step = 0; step < ANCESTOR_STEPS && node && node !== element.ownerDocument.body; step++) {
       let sibling = node.previousElementSibling;
       for (let count = 0; sibling && count < SIBLING_STEPS; count++, sibling = sibling.previousElementSibling) {
-        if (sibling.querySelector?.("input, textarea, select")) break;
+        if (sibling.matches("input, textarea, select") || sibling.querySelector("input, textarea, select")) {
+          if (fallback) return fallback;
+          break;
+        }
         const found = text(sibling);
-        if (found) return found;
+        if (!found) continue;
+        if (!skip?.test(found)) return found;
+        fallback ||= found;
       }
       node = node.parentElement;
     }
-    return "";
+    return fallback;
   }
 
   // A radio or checkbox group's question: its fieldset's legend, its
@@ -244,17 +273,23 @@
 
   // ---------- filling in ----------
 
+  function uploadedFiles(frame) {
+    return text(frame?.parentElement?.querySelector(".filenames"));
+  }
+
   function fieldState(field) {
     return JSON.stringify((field.elements ?? [field.element]).map((element) => ({
       value: element.value,
       checked: element.checked,
       files: [...(element.files ?? [])].map((file) => [file.name, file.size, file.lastModified]),
+      uploadedFiles: uploadedFiles(field.frame),
     })));
   }
 
   function requireUnchanged(field) {
     const elements = field.elements ?? [field.element];
     if (elements.some((element) => !element.isConnected || element.disabled || element.readOnly)
+        || (field.frame && (!field.frame.isConnected || !shown(field.frame) || field.frame.contentDocument !== field.element.ownerDocument))
         || fieldState(field) !== field.initialState) {
       throw new Error("changed while waiting: kept your answer");
     }
@@ -312,6 +347,7 @@
   // The field's box on the page: a hidden upload's visible drop zone, a
   // group's box around its options.
   function shownPart(field) {
+    if (field.frame) return field.frame;
     if (field.elements) {
       let holder = field.elements[0].parentElement;
       while (holder && !field.elements.every((element) => holder.contains(element))) holder = holder.parentElement;
@@ -344,9 +380,10 @@
 
   // ---------- the box ----------
 
-  function panel(match) {
-    const host = document.createElement("div");
+  function panel(match, page) {
+    const host = page.createElement("div");
     host.id = ROOT_ID;
+    if (page.defaultView !== window.top) host.setAttribute("data-embedded", "");
     // A shadow root keeps the page's styles out of the box and the box's out of the page.
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
@@ -355,6 +392,7 @@
         .box { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; width: 340px; max-width: calc(100vw - 32px);
                font: 14px/1.4 system-ui, sans-serif; color: #142430; background: #fff; border: 1px solid #cfd6d3;
                border-radius: 12px; box-shadow: 0 8px 32px rgb(0 0 0 / 0.18); padding: 12px; }
+        :host([data-embedded]) .box { top: 44px; bottom: auto; }
         h2 { font-size: 15px; margin: 0 0 4px; display: flex; justify-content: space-between; gap: 8px; }
         .close { font: inherit; border: 0; background: none; font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; color: inherit; }
         .match { margin: 0 0 8px; color: #4d5b63; }
@@ -378,7 +416,7 @@
         <p class="match"></p>
         <p class="status" role="status">Reading the form…</p>
         <ul class="log" hidden></ul>
-        <p class="end" hidden>Nothing was sent. Read every answer, then send the form yourself.</p>
+        <p class="end" hidden>Review the answers and attachments before submitting the application.</p>
         <button class="applied" type="button" hidden>I sent it: mark as applied</button>
         <p class="marked" role="status" hidden></p>
       </div>`;
@@ -399,13 +437,16 @@
         $(".applied").disabled = false;
       }
     });
-    document.body.append(host);
+    page.body.append(host);
     return {
+      active() {
+        return host.isConnected && Boolean(page.defaultView);
+      },
       status(said) {
         $(".status").textContent = said;
       },
       line(said, how, field) {
-        const item = document.createElement("li");
+        const item = page.createElement("li");
         item.className = how;
         item.textContent = said;
         if (field) {

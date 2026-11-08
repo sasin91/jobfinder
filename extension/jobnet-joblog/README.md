@@ -103,9 +103,9 @@ with the manifest.
 
 On an employer's own application form (Recruitee, Teamtailor, Greenhouse,
 Workday and the like), press the extension's toolbar button. Under "Fill in
-this application form", pick the saved match it is for (the one whose post the
-page comes from is picked already: its address, or the company in the address
-or the tab's title) and press "Fill in". A box in the page's corner says what
+this application form", pick the saved match it is for and press "Fill in".
+The extension preselects a match when the page identifies it by its post URL
+or by the job title and company. A box in the page's corner says what
 went in each field and what was left for you; filled fields get a green
 outline, the ones left a yellow one. Click a line to scroll to its field.
 
@@ -134,6 +134,8 @@ Fields that already have something in them are kept as they are. A consent or
 privacy box is never ticked, and nothing is sent: read every answer, then send
 the form yourself.
 
-It works on the page's own form, not one inside a frame or a pop-up from
-another site (open that on its own page first), and on plain fields: a
-drop-down the site draws itself instead of a `<select>` is left for you.
+Search by job title or company to find a match. If the popup finds several
+forms, choose the application form before filling. The browser may ask for
+access to the site hosting an embedded form. If the extension cannot identify
+it, open the application form in its own tab. Custom controls such as a
+drop-down drawn by the site are left for you.

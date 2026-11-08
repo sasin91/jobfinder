@@ -2,6 +2,11 @@ JobFinder checks the job sites for you while your PC is on, matches each post wi
 
 ## New in 0.1.1
 
+- **Application autofill.** Search your shortlist from the browser extension and fill supported embedded forms, including CV and application upload widgets. Review the filled fields and attachments before submitting. Reload the unpacked extension after updating JobFinder.
+- **Form-answer model.** Pick a model for application questions in Language models. The built-in local provider defaults to Qwen3 4B. You can also select a downloaded GGUF such as IBM Granite 4.1 3B.
+- **Match review.** Scoped experience requirements and unconfirmed commute locations are handled more carefully. Saved matches can be sorted by date, and irrelevant matches have their own rejection reason.
+- **Recordings.** Transcribe calls and notes on your computer with Whisper.
+- **Game mode.** See when a game is using the GPU and control game mode manually.
 - **Years of work.** Letters and résumés no longer guess how long you have worked. The count comes from the dates of the jobs in your profile, and you can correct it on the Setup screen. The match without an AI model uses the same number.
 - If you ran 0.1.0, start the new file the same way: your database is updated the first time it opens.
 

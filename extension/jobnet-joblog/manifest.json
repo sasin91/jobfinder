@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Joblog autofill, by JobFinder",
   "short_name": "Joblog autofill",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Fills in Jobnet's \"Opret joblog\" form from a match you saved in JobFinder, PDFs included, sends the job post you have open to JobFinder, and fills in an employer's application form from a match. Not made by Jobnet.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApT7WTjmvr8ckr49gwDVTOt41Xlt0JYi2yrqBEPHyrM51JREXmizzS3pIpC/wOMWwKW1p5P5X98G734YiT3G8qpXq0+GiNRznmXLADq3jkbw0i23An3byHGh3sY/h51hxisO9FIINowWwLs3my/Sv666wowhu6cWImaWorv65DWluxx7gT/OtUkuE02LzOBXsC1Kq6dtfQT55YpdRfSvWXusYy9sGBoyhLOejMXXPVSUP3Sfdj8raRsAkwIwSseCkoXEQTWl3+rBFfgRuw9cIf4rtzMJ5A8ixOSdMwVHOx7Ly1WrXAdipwBsjJTaAg2HkTp01IEnzHSRTvy50L07HCQIDAQAB",
   "homepage_url": "https://recruiter.trongate.dev/joblog_extension",
@@ -38,6 +38,8 @@
   },
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["http://127.0.0.1/*", "https://recruiter.trongate.dev/*", "https://cvrapi.dk/*"],
+  "optional_permissions": ["webNavigation"],
+  "optional_host_permissions": ["https://*/*"],
   "browser_specific_settings": {
     "gecko": {
       "id": "jobnet-joblog@recruiter.trongate.dev",

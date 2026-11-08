@@ -9,8 +9,8 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../jobnet-joblog/form-fill.js'), 'utf8');
 const context = vm.createContext({ chrome: {}, Event });
 vm.runInContext(source.replace('  const picked = window.__jobfinderForm;',
-  '  globalThis.testing = { fieldState, requireUnchanged, fillField }; return;'), context);
-const { fieldState, requireUnchanged, fillField } = context.testing;
+  '  globalThis.testing = { fieldState, requireUnchanged, fillField, readFields }; return;'), context);
+const { fieldState, requireUnchanged, fillField, readFields } = context.testing;
 
 function input(extra = {}) {
   return { value: '', checked: false, files: [], isConnected: true,
@@ -49,6 +49,59 @@ test('an upload selected during the PDF fetch is preserved', () => {
   const target = field(element, { kind: 'file' });
   element.files = [{ name: 'my-cv.pdf', size: 42, lastModified: 1 }];
   assert.throws(() => requireUnchanged(target), /kept your answer/);
+});
+
+test('a file input reads the CV heading above the drop zone prompt', () => {
+  const sibling = (textContent, extra = {}) => ({
+    textContent, matches: () => false, querySelector: () => null, ...extra,
+  });
+  const body = {};
+  const page = { body, defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) } };
+  const dropZone = {
+    ownerDocument: page,
+    getClientRects: () => [{}],
+    parentElement: { parentElement: body },
+    previousElementSibling: sibling('', { previousElementSibling: sibling('VEDHÆFTET CV') }),
+  };
+  const element = input({
+    ownerDocument: page,
+    tagName: 'INPUT',
+    getAttribute: (name) => name === 'type' ? 'file' : null,
+    closest: () => null,
+    dataset: {},
+    parentElement: dropZone,
+    previousElementSibling: sibling('Tilføj filTræk fil hertil'),
+  });
+  page.querySelectorAll = (selector) => selector === 'iframe[title]' ? [] : [element];
+  context.document = page;
+  assert.equal(readFields().list[0].label, 'VEDHÆFTET CV');
+
+  // Keep the generic prompt if the preceding upload has a heading of its own.
+  dropZone.previousElementSibling = sibling('Cover letter', { querySelector: () => ({}) });
+  assert.equal(readFields().list[0].label, 'Tilføj filTræk fil hertil');
+});
+
+test('nested upload inputs use the frame label and preserve uploaded attachments', () => {
+  const form = {};
+  const page = { defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) } };
+  const uploadPage = {};
+  const element = input({ ownerDocument: uploadPage, dataset: {}, getAttribute: () => null });
+  uploadPage.querySelectorAll = () => [element];
+  const filenames = { textContent: '' };
+  const frame = {
+    ownerDocument: page, title: 'Application', contentDocument: uploadPage, isConnected: true,
+    closest: () => form, getClientRects: () => [{}], parentElement: { querySelector: () => filenames },
+  };
+  page.querySelectorAll = (selector) => selector === 'iframe[title]' ? [frame] : [];
+
+  const [upload] = readFields(page, form).list;
+  assert.equal(upload.label, 'Application');
+  assert.equal(upload.element, element);
+  assert.doesNotThrow(() => requireUnchanged(upload));
+
+  filenames.textContent = 'my-application.pdf';
+  assert.throws(() => requireUnchanged(upload), /kept your answer/);
+  assert.equal(readFields(page, form).kept, 1);
 });
 
 test('detached and newly disabled controls are left alone', () => {

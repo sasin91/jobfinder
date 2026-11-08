@@ -392,7 +392,8 @@ pub fn plan(
     for field in fields {
         let about = format!("{} {}", field.label.to_lowercase(), field.hint);
         if field.kind == kind::FILE {
-            if names_cover_letter(&about) {
+            let label = field.label.trim().trim_end_matches('*').trim_end();
+            if label.eq_ignore_ascii_case("application") || names_cover_letter(&about) {
                 if written.application {
                     answer(
                         &mut plan,
@@ -713,7 +714,7 @@ mod tests {
     #[test]
     fn uploads_get_the_letter_the_resume_or_the_cv() {
         let fields = [
-            field("letter", "Cover letter Upload your cover letter", kind::FILE),
+            field("letter", "Application*", kind::FILE),
             field("cv", "CV", kind::FILE),
             field("other", "Anything else", kind::FILE),
         ];

@@ -36,7 +36,7 @@ jobs:
         with:
           workspaces: app
       - run: cargo fmt --check
-      - run: node --test ../extension/tests/form-fill.test.cjs
+      - run: node --test ../extension/tests
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --release
 

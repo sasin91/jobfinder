@@ -11,6 +11,8 @@
   p { margin: 0 0 10px; color: var(--muted); overflow-wrap: anywhere; }
   label { display: block; margin: 0 0 4px; font-weight: 600; }
   select { width: 100%; margin: 0 0 12px; padding: 4px; }
+  input[type="search"] { font: inherit; box-sizing: border-box; width: 100%; margin: 0 0 12px; padding: 4px; }
+  fieldset { min-inline-size: 0; margin: 0; border: 0; padding: 0; }
   button { font: inherit; padding: 6px 16px; border-radius: 4px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
   #said, #filled { margin: 10px 0 0; color: inherit; }
@@ -34,13 +36,23 @@
 </section>
 <section>
   <h1>Fill in this application form</h1>
-  <label for="match">From the match</label>
-  <select id="match"><option>Loading your saved matches…</option></select>
-  <div class="buttons">
-    <button id="fill" disabled>Fill in</button>
-    <button id="applied" class="second" disabled>Mark as applied</button>
-  </div>
-  <p id="filled" role="status">Contact details, uploads and answers to the questions. Nothing is sent: you read it and send it.</p>
+  <label for="match-search">Search matches</label>
+  <input id="match-search" type="search" placeholder="Job title or company" disabled>
+  <fieldset id="match-actions" disabled>
+    <label for="match">From the match</label>
+    <select id="match"><option>Loading your saved matches…</option></select>
+    <div id="form-picker" hidden>
+      <label for="form-target">Application form</label>
+      <select id="form-target"></select>
+    </div>
+    <fieldset id="match-buttons" disabled>
+      <div class="buttons">
+        <button id="fill">Fill in</button>
+        <button id="applied" class="second">Mark as applied</button>
+      </div>
+    </fieldset>
+  </fieldset>
+  <p id="filled" role="status">Fill in contact details, uploads and answers. Review them before submitting the application.</p>
 </section>
 <script src="popup.js"></script>
 </body>
