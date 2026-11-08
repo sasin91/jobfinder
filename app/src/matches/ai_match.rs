@@ -66,7 +66,7 @@ pub async fn ai_match(
 ) -> Result<AiMatch, LlmException> {
     let job = new.job;
     let matcher = Matcher::new(matching.taxonomy, profile.clone(), known);
-    let groups = matcher::criteria(job);
+    let groups = matcher::criteria_for_post(job, new.job_text);
     let mut verdicts = Verdicts::new();
     let mut undecided = Vec::new();
     for unit in matcher::units(&groups) {
@@ -78,15 +78,16 @@ pub async fn ai_match(
                 id: unit.id.clone(),
                 text: unit.text.clone(),
                 kind: unit.kind.clone(),
+                min_years: unit.min_years,
             }),
         }
     }
     match llm {
         Some(llm) if !undecided.is_empty() => {
-            let cv_text = if profile.text_en.is_empty() {
-                new.cv_text
-            } else {
+            let cv_text = if new.cv_text.trim().is_empty() {
                 &profile.text_en
+            } else {
+                new.cv_text
             };
             let judged = match_prompts::judge(
                 llm,
@@ -99,24 +100,20 @@ pub async fn ai_match(
             .await?;
             // Only the requirements it was asked about: an id it made up, or one the taxonomy
             // decided, would put its verdict on the wrong requirement.
-            let asked = |verdict: &match_prompts::Judged| undecided.iter().any(|unit| unit.id == verdict.id);
-            for verdict in judged.into_iter().filter(asked) {
-                verdicts.insert(
-                    verdict.id,
-                    Verdict {
-                        verdict: verdict.verdict,
-                        by: "llm".to_string(),
-                        method: "judgement".to_string(),
-                        evidence: verdict.evidence,
-                        reason: verdict.reason,
-                    },
-                );
+            let cv_for_evidence = evidence_text(cv_text);
+            for unit in undecided {
+                if let Some(answer) = judged.iter().find(|answer| answer.id == unit.id) {
+                    let verdict = grounded_verdict(&unit, answer, &cv_for_evidence);
+                    verdicts.insert(unit.id, verdict);
+                } else if unit.kind == LOCATION {
+                    verdicts.insert(unit.id, matcher::location_to_check("The match could not verify the commute."));
+                }
             }
         }
         _ => {
             for unit in undecided {
                 let verdict = match unit.kind.as_str() {
-                    LOCATION => unweighed(UNWEIGHED_LOCATION_REASON),
+                    LOCATION => matcher::location_to_check(UNWEIGHED_LOCATION_REASON),
                     LANGUAGE => unweighed(UNWEIGHED_LANGUAGE_REASON),
                     _ => not_found(),
                 };
@@ -129,12 +126,35 @@ pub async fn ai_match(
     } else {
         new.cv_name
     };
-    Ok(score_and_save(matching, NewMatch { cv_name, ..new }, &verdicts).await)
+    Ok(score_and_save(matching, NewMatch { cv_name, ..new }, groups, &verdicts).await)
+}
+
+fn evidence_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn grounded_verdict(unit: &Undecided, answer: &match_prompts::Judged, cv: &str) -> Verdict {
+    let mut verdict = Verdict {
+        verdict: answer.verdict.clone(),
+        by: "llm".into(),
+        method: "judgement".into(),
+        evidence: answer.evidence.clone(),
+        reason: answer.reason.clone(),
+    };
+    // Location and language use the structured candidate details, rather than CV excerpts.
+    if matches!(answer.verdict.as_str(), "met" | "partial") && !matches!(unit.kind.as_str(), LOCATION | LANGUAGE) {
+        let quote = evidence_text(answer.evidence.trim().trim_matches(['"', '“', '”', '«', '»']));
+        if quote.is_empty() || !cv.contains(&quote) {
+            verdict.verdict = "missing".into();
+            verdict.evidence.clear();
+            verdict.reason = "The model did not provide a verifiable excerpt from the CV.".into();
+        }
+    }
+    verdict
 }
 
 /// The verdicts scored, and saved as the user's match.
-async fn score_and_save(matching: &Matching<'_>, new: NewMatch<'_>, verdicts: &Verdicts) -> AiMatch {
-    let groups = matcher::criteria(new.job);
+async fn score_and_save(matching: &Matching<'_>, new: NewMatch<'_>, groups: Groups, verdicts: &Verdicts) -> AiMatch {
     let verdicts = matcher::combine(&groups, verdicts);
     let score = matcher::score(&groups, &verdicts);
     let laya_summary = matcher::laya_summary(new.job, &groups, &verdicts);
@@ -184,7 +204,7 @@ fn not_found() -> Verdict {
     }
 }
 
-/// A location or language requirement nobody weighed (no AI key on for evaluating job posts):
+/// A language requirement nobody weighed (no AI key on for evaluating job posts):
 /// partial, so it's shown without capping the score, with the reason saying why.
 fn unweighed(reason: &str) -> Verdict {
     Verdict {
@@ -210,4 +230,36 @@ pub fn laya_input(job: &Job, job_text: &str, profile: &Profile, cv_text: &str, s
         quoted(cv),
         quoted(summary)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_verdict_needs_an_excerpt_from_the_cv() {
+        let unit = Undecided {
+            id: "a0".into(),
+            text: "Lead a municipal home-care team".into(),
+            kind: "responsibility".into(),
+            min_years: None,
+        };
+        let answer = match_prompts::Judged {
+            id: unit.id.clone(),
+            verdict: "met".into(),
+            evidence: "Led development in the municipal home-care team".into(),
+            reason: "Shown in the CV.".into(),
+        };
+        let cv = evidence_text("Software developer\nLed a team of\n four software engineers.");
+        let verdict = grounded_verdict(&unit, &answer, &cv);
+        assert_eq!(verdict.verdict, "missing");
+        assert!(verdict.evidence.is_empty());
+
+        let transferable = match_prompts::Judged {
+            verdict: "partial".into(),
+            evidence: "“Led a team of four software engineers”".into(),
+            ..answer
+        };
+        assert_eq!(grounded_verdict(&unit, &transferable, &cv).verdict, "partial");
+    }
 }

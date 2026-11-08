@@ -12,10 +12,11 @@ const READ_JOB: &str = r#"You read job posts (often Danish) for a candidate and 
 
 requirements is one list of what a candidate must or should have. Keep each entry atomic: one skill, tool, language, certificate, education, amount of experience or trait ("Erfaring med PHP og Laravel" is two entries).
 - value names it as the post does, without qualifiers like "erfaring med" or "kendskab til".
-- kind: skill, education, certificate, experience, language, soft_skill for personal traits ("selvstændig", "god til at samarbejde"), or location for where the candidate must live or show up ("You need to be located close to Copenhagen", "bosat i Nordjylland", "3 dage om ugen på kontoret i Aarhus"). value names the place and how it is asked ("Located close to Copenhagen", "On site in Aarhus 3 days a week"). Only the employer's office address, or a post that allows full remote work, is no location requirement.
+- kind: skill, education, certificate, experience, language, soft_skill for personal traits ("selvstændig", "god til at samarbejde"), or location for where the candidate must live or show up. Hybrid and on-site jobs require a location entry even when attendance is stated only in a label. Include the workplace named for this role and the attendance required ("On site in Aarhus 3 days a week"). If the office location is unstated, say so in value ("Hybrid work; office location not stated"). A mailing address by itself is no attendance requirement. Fully remote work has no office requirement, but a stated residency restriction still counts. Ignore locations and work arrangements for other listings on the page.
 - required is false for nice-to-haves ("en fordel", "gerne", "a plus").
 - Alternatives share an alt_group label ("pædagog eller pædagogisk assistent": two entries, alt_group "a"; "uddannet kok eller 5 års erfaring": an education and an experience entry, alt_group "b"); alt_group is empty otherwise.
 - min_years: the years of experience asked for ("et par år" = 2, "flere års" = 3, none stated = 0).
+- For a duration, retain its exact scope in value ("5+ years in backend development", "at least 2 years in a senior role making architecture decisions"). Keep separate thresholds separate. Use a generic years-of-experience value only when the post asks for total professional experience.
 - min_level: the level asked for, in English, when the post states one ("flydende" = "fluent", "modersmål" = "native", "kandidat" = "master's degree", "senior"); empty otherwise.
 
 working_language: the language the job is done in, named in English ("Danish", "English", "Finnish"). It is the language the post's own sentences are written in, even when the post never asks for it: a post in Finnish expects a Finnish speaker. Only when the post names another working language ("our working language is English", "you don't need to speak Danish") is it that one. Judge it from the post's own text, not from a job board's buttons around it.
@@ -39,18 +40,22 @@ const JUDGE: &str = r#"You judge whether a candidate meets job requirements, fro
 - "partial" when the CV shows something close or transferable but not the thing itself (Vue for React, Symfony for Laravel),
 - "missing" when the CV shows nothing relevant.
 
+For a job title, compare the occupation and domain shown by the CV. An unrelated occupation is missing even if it shares general responsibilities, seniority or language. Judge responsibilities against concrete past duties. Never add the job's duties, industry or working methods to the CV evidence.
+For a named tool or framework, a different tool can be partial if it is transferable. Kubernetes alone does not demonstrate Docker. Laravel shows PHP, but Laravel alone does not show Symfony when Symfony is required.
+For a minimum number of years, count only relevant dated work or use a stated duration in that exact scope. Count overlapping periods once. Give partial when the CV shows relevant work but the duration is unclear or falls short. Total career years do not establish years in a particular role, activity or technology.
+
 A location requirement is about where the candidate lives, against the place and commute the post asks for:
-- "met" when they live there or within an easy daily commute (about 45 minutes),
-- "partial" when the commute is longer but the post doesn't ask for someone close or local, or when nothing says where they live,
-- "missing" when the post asks for someone close, local or living in the area and they live farther (Slagelse is about 100 km from Copenhagen: "missing" for "located close to Copenhagen").
-Its reason names both places and the rough distance or commute.
+- "met" when they satisfy the residency restriction or live within an easy commute for the attendance required,
+- "partial" when either place or the feasibility of the commute is unclear,
+- "missing" when the candidate fails a stated residency restriction or the required on-site attendance clearly cannot be commuted to, including an impractical cross-country commute.
+Use only the places given. Its reason names the known places and what still needs checking, if anything. Never guess an office location, remote eligibility or willingness to relocate.
 
 A language requirement is about the languages the candidate speaks, judged from "The candidate's languages" line only: it lists the languages the original CV is written in or names. The CV below may be an English translation, so the language it is written in says nothing.
 - "met" when that line names the language (at the level asked, if any; the CV may say the level),
 - "partial" when the CV gives it at a lower level than asked, or the line names a closely related language the candidate could work in (Norwegian or Swedish for Danish),
 - "missing" otherwise: a language is no skill to infer, and Danish is no Finnish.
 
-Be strict: a guess is "missing". evidence quotes the CV briefly, empty when missing. reason is one short sentence in English."#;
+Be strict: a guess is "missing". For each met or partial qualification, evidence is one brief verbatim excerpt in the CV's original language. Copy it exactly, without a preamble, translation or ellipsis. For location and language, use the candidate information given above the CV. Leave evidence empty when missing. reason is one short sentence in English."#;
 
 /// The longest answer each read may write, in tokens: about twice the longest a local model wrote
 /// for it in the model bake-off, so one that repeats a list until its context is full stops in a
@@ -72,6 +77,7 @@ pub struct Undecided {
     pub id: String,
     pub text: String,
     pub kind: String,
+    pub min_years: Option<i64>,
 }
 
 /// The model's verdict on one requirement.
@@ -125,8 +131,7 @@ pub async fn read_cv(llm: &Llm, text: &str) -> Result<Profile, LlmException> {
 /// The model's verdict on each requirement the taxonomy couldn't decide. location is where the
 /// candidate lives (as the CV gives it), for location requirements; "" when it isn't known.
 /// languages are the ones the original CV is written in or names (Profile::language), for
-/// language requirements: cv_text is often the CV's English translation, which would make
-/// English look spoken and hide the CV's own language.
+/// language requirements. cv_text is the original CV when available.
 pub async fn judge(
     llm: &Llm,
     job_title: &str,
@@ -137,7 +142,11 @@ pub async fn judge(
 ) -> Result<Vec<Judged>, LlmException> {
     let list = items
         .iter()
-        .map(|item| format!("- [{}] ({}) {}", item.id, item.kind, item.text))
+        .map(|item| {
+            let minimum = item.min_years.filter(|&years| years > 0)
+                .map_or_else(String::new, |years| format!(" (minimum {years} years in this scope)"));
+            format!("- [{}] ({}) {}{minimum}", item.id, item.kind, item.text)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let lives = if location.is_empty() {

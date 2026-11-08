@@ -4,7 +4,10 @@
 //! `Profile`). Verdicts are keyed by item id: { verdict: met|partial|missing, by, method,
 //! evidence, reason }.
 
+use std::sync::LazyLock;
+
 use indexmap::IndexMap;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::{Job, KnownTerm, Profile, seniority};
@@ -33,6 +36,8 @@ pub mod credit {
 /// level (a student job for someone with ten years of work). Just under "medium", so it ranks
 /// below real fits and isn't tailored right away.
 pub const DISQUALIFIED_INDEX: f64 = 0.59;
+/// A required workplace that still needs checking ranks below a good match.
+pub const UNCONFIRMED_LOCATION_INDEX: f64 = 0.79;
 
 /// The legacy ranker's tags, by the lowest match index that earns them.
 pub mod tags {
@@ -65,6 +70,13 @@ pub const DISQUALIFIERS: [&str; 3] = [LOCATION, LANGUAGE, LEVEL];
 
 /// The id of the item for the language the job is done in (Job::working_language).
 const WORKING_LANGUAGE_ID: &str = "w0";
+const UNCONFIRMED_WORKPLACE_ID: &str = "p0";
+
+// Recognize standalone job-board labels without treating a mention in prose as a work mode.
+static OFFICE_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)(?:^|\|)[ \t]*(?:📍[ \t]*)?(hybrid(?: work|arbejde)?|on[- ]?site|på kontoret)[ \t]*(?:\||\r?$)")
+        .expect("office work labels")
+});
 
 /// One thing a verdict is given on, or a group of alternatives met by the best of them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,12 +203,22 @@ impl<'a> Matcher<'a> {
     /// A verdict the taxonomy (or plain arithmetic) can give without the model, or None when it
     /// can't decide.
     pub fn decide(&self, item: &Item) -> Option<Verdict> {
+        if item.kind == LOCATION {
+            if item.id == UNCONFIRMED_WORKPLACE_ID
+                || item.english.as_deref().is_some_and(|text| text.to_lowercase().contains("office location not stated"))
+            {
+                return Some(location_to_check("Check where the office is and whether the commute works for you."));
+            }
+            if self.profile.location.trim().is_empty() {
+                return Some(location_to_check("The CV is missing your home location."));
+            }
+        }
         if item.kind == LEVEL {
             let level = item.min_level.as_deref().unwrap_or("");
             return Some(seniority::verdict(level, self.profile.experience_years));
         }
         let min_years = item.min_years.unwrap_or(0);
-        if item.kind == "experience" && min_years > 0 {
+        if min_years > 0 && is_total_experience(item, min_years) {
             let have = self.profile.experience_years;
             let verdict = if have >= min_years {
                 "met"
@@ -215,7 +237,8 @@ impl<'a> Matcher<'a> {
         }
         // A level ("fluent", "master's degree") is more than the taxonomy knows, and where
         // someone lives is the model's to weigh.
-        if matches!(item.kind.as_str(), "location" | "responsibility" | "experience")
+        if min_years > 0
+            || matches!(item.kind.as_str(), "location" | "responsibility" | "experience")
             || item.min_level.as_deref().is_some_and(|l| !l.is_empty())
         {
             return None;
@@ -275,6 +298,18 @@ impl<'a> Matcher<'a> {
         }
         None
     }
+}
+
+/// The free reader and older generic requirements use these labels for total years.
+fn is_total_experience(item: &Item, years: i64) -> bool {
+    item.kind == "experience"
+        && [format!("{years} years of experience"), format!("{years} års erfaring")]
+            .iter()
+            .any(|label| item.text.eq_ignore_ascii_case(label))
+}
+
+pub(super) fn location_to_check(reason: &str) -> Verdict {
+    verdict_of("partial", "rule", "location_unconfirmed", String::new(), reason.into())
 }
 
 /// Whether `have` is the parent, a child or a sibling of `term`.
@@ -485,6 +520,27 @@ pub fn criteria(job: &Job) -> Groups {
     out
 }
 
+/// Keep a workplace check when the job board labels the role hybrid or on-site and the
+/// reader returned no required location.
+pub(super) fn criteria_for_post(job: &Job, post: &str) -> Groups {
+    let mut groups = criteria(job);
+    if !groups.contains_key(LOCATION) && let Some(label) = OFFICE_LABEL.captures(post) {
+        groups.insert(
+            LOCATION.into(),
+            vec![Item {
+                id: UNCONFIRMED_WORKPLACE_ID.into(),
+                kind: LOCATION.into(),
+                text: format!("{} · office location to check", &label[1]),
+                english: None,
+                min_years: None,
+                min_level: None,
+                alternatives: None,
+            }],
+        );
+    }
+    groups
+}
+
 /// The post's career level as an item, when it was read with one (seniority::with_level).
 fn level_item(job: &Job) -> Option<Item> {
     let level = job.level.clone();
@@ -658,7 +714,8 @@ pub fn laya_summary(job: &Job, groups: &Groups, verdicts: &Verdicts) -> String {
 
 /// The legacy ranking over the criteria: each non-empty criterion scores the share of its items
 /// met (as a whole percent), times its weight; the match index is the sum over the sum of
-/// weights. A missed disqualifier (missed_disqualifiers) caps the index at DISQUALIFIED_INDEX.
+/// weights. A missed disqualifier caps the index below medium. An unconfirmed location caps it
+/// below good.
 pub fn score(groups: &Groups, verdicts: &Verdicts) -> Score {
     /// A share as a whole percent.
     const PERCENT: f64 = 100.0;
@@ -687,6 +744,10 @@ pub fn score(groups: &Groups, verdicts: &Verdicts) -> Score {
     let mut index = if total > 0 { rank as f64 / total as f64 } else { 0.0 };
     if !missed_disqualifiers(groups, verdicts).is_empty() {
         index = index.min(DISQUALIFIED_INDEX);
+    } else if groups.get(LOCATION).into_iter().flatten().any(|item| {
+        verdicts.get(&item.id).is_none_or(|verdict| verdict.verdict != "met")
+    }) {
+        index = index.min(UNCONFIRMED_LOCATION_INDEX);
     }
     Score {
         rank,
@@ -734,6 +795,48 @@ mod tests {
             verdict_of("met", "taxonomy", "exact", "Udvikler".into(), String::new()),
         );
         (groups, verdicts)
+    }
+
+    #[test]
+    fn a_hybrid_label_without_a_workplace_requires_a_commute_check() {
+        let job = Job { job_title: "Senior Backend Engineer".into(), ..Job::default() };
+        let post = "Senior Backend Engineer (PHP)\r\n\r\nUp to €6.5K/month | 📍Hybrid | PHP (Symfony)";
+        let groups = criteria_for_post(&job, post);
+        let workplace = &groups[LOCATION][0];
+        let taxonomy = Taxonomy::from_records(vec![]);
+        let matcher = Matcher::new(&taxonomy, Profile::default(), IndexMap::new());
+        let workplace_verdict = matcher.decide(workplace).unwrap();
+        assert_eq!(workplace_verdict.verdict, "partial");
+        let verdicts = Verdicts::from([
+            (workplace.id.clone(), workplace_verdict),
+            ("t0".into(), verdict_of("met", "taxonomy", "exact", String::new(), String::new())),
+        ]);
+        assert_eq!(score(&groups, &verdicts).index, UNCONFIRMED_LOCATION_INDEX);
+        assert!(!criteria_for_post(&job, "Senior Backend Engineer | Fully remote").contains_key(LOCATION));
+    }
+
+    #[test]
+    fn total_experience_does_not_decide_a_scoped_minimum() {
+        let taxonomy = Taxonomy::from_records(vec![]);
+        let profile = Profile { experience_years: 9, ..Profile::default() };
+        let matcher = Matcher::new(&taxonomy, profile, IndexMap::new());
+        let job = Job {
+            requirements: [
+                "2 years in a senior role making architecture decisions",
+                "2 years of experience",
+            ].map(|value| super::super::Requirement {
+                value: value.into(),
+                kind: "experience".into(),
+                required: true,
+                min_years: 2,
+                ..Default::default()
+            }).to_vec(),
+            ..Job::default()
+        };
+        let groups = criteria(&job);
+        let items = &groups[REQUIREMENTS];
+        assert!(matcher.decide(&items[0]).is_none());
+        assert_eq!(matcher.decide(&items[1]).unwrap().verdict, "met");
     }
 
     #[test]

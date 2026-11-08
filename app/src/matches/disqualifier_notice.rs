@@ -1,15 +1,18 @@
 //! The likely disqualifiers of a match, as the result prints them above the requirements: where
 //! the post asks the candidate to live or show up when they likely don't, a language they don't
 //! speak (one the post asks for, or the one the job is done in), and a career level their years
-//! don't fit (a student job for a senior). Each line is the post's words and the reason. Such a
-//! match is capped just under "medium" (matcher::DISQUALIFIED_INDEX), not hidden.
+//! don't fit (a student job for a senior). A workplace that still needs checking has its own
+//! notice. Each line gives the post's words and the reason.
 
 use super::match_model::SavedItem;
 use super::matcher::{self, Groups, Verdicts};
 
 /// The heading and note when the only disqualifier is where the candidate lives.
 pub const LOCATION_HEADING: &str = "Likely disqualifier: where you live";
-pub const LOCATION_NOTE: &str = "The score is capped below medium for this. Apply anyway if you can move or commute.";
+pub const LOCATION_NOTE: &str = "The score is capped below medium for this, and a job scan skips automatic tailoring.";
+pub const LOCATION_CHECK_HEADING: &str = "Workplace to check";
+pub const LOCATION_CHECK_NOTE: &str =
+    "Confirm the commute or residency requirement. Job scans skip automatic tailoring while this needs checking.";
 /// The heading and note when the only disqualifier is a language the candidate doesn't speak.
 pub const LANGUAGE_HEADING: &str = "Likely disqualifier: a language you don't speak";
 pub const LANGUAGE_NOTE: &str =
@@ -46,7 +49,21 @@ impl DisqualifierNotice {
                 reason: verdicts.get(&item.id).map(|v| v.reason.clone()).unwrap_or_default(),
             })
             .collect();
-        notice(&criteria, lines)
+        notice(&criteria, lines).or_else(|| {
+            let lines = groups
+                .get(matcher::LOCATION)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| {
+                    let verdict = verdicts.get(&item.id)?;
+                    (verdict.verdict == "partial").then(|| DisqualifierLine {
+                        text: item.text.clone(),
+                        reason: verdict.reason.clone(),
+                    })
+                })
+                .collect();
+            location_check(lines)
+        })
     }
 
     /// A saved match's items (match_items).
@@ -60,7 +77,17 @@ impl DisqualifierNotice {
                 reason: item.reason.clone(),
             })
             .collect();
-        notice(&criteria, lines)
+        notice(&criteria, lines).or_else(|| {
+            let lines = items
+                .iter()
+                .filter(|item| item.criterion == matcher::LOCATION && item.verdict == "partial")
+                .map(|item| DisqualifierLine {
+                    text: item.text.clone(),
+                    reason: item.reason.clone(),
+                })
+                .collect();
+            location_check(lines)
+        })
     }
 }
 
@@ -70,11 +97,20 @@ pub fn is_missed_disqualifier(item: &SavedItem) -> bool {
     matcher::DISQUALIFIERS.contains(&item.criterion.as_str()) && item.verdict == "missing"
 }
 
-/// Whether a saved match misses a language: a job scan writes nothing for it then.
-pub fn misses_a_language(items: &[SavedItem]) -> bool {
-    items
-        .iter()
-        .any(|item| item.criterion == matcher::LANGUAGE && is_missed_disqualifier(item))
+/// A required workplace needs to be feasible, and the candidate must speak the working language.
+pub fn blocks_tailoring(items: &[SavedItem]) -> bool {
+    items.iter().any(|item| {
+        (item.criterion == matcher::LOCATION && item.verdict != "met")
+            || (item.criterion == matcher::LANGUAGE && is_missed_disqualifier(item))
+    })
+}
+
+fn location_check(lines: Vec<DisqualifierLine>) -> Option<DisqualifierNotice> {
+    (!lines.is_empty()).then_some(DisqualifierNotice {
+        heading: LOCATION_CHECK_HEADING,
+        note: LOCATION_CHECK_NOTE,
+        lines,
+    })
 }
 
 /// The notice for the missed lines, under the criterion of each.
@@ -138,13 +174,20 @@ mod tests {
     }
 
     #[test]
-    fn only_a_missed_language_stops_the_writing() {
-        assert!(misses_a_language(&[missing(matcher::LANGUAGE, "Finnish")]));
-        assert!(!misses_a_language(&[missing(matcher::LOCATION, "Aarhus")]));
+    fn a_missed_language_or_an_unconfirmed_workplace_stops_the_writing() {
+        assert!(blocks_tailoring(&[missing(matcher::LANGUAGE, "Finnish")]));
+        assert!(blocks_tailoring(&[missing(matcher::LOCATION, "Aarhus")]));
+        let unconfirmed = SavedItem {
+            verdict: "partial".into(),
+            ..missing(matcher::LOCATION, "Hybrid work")
+        };
+        let notice = DisqualifierNotice::from_saved(std::slice::from_ref(&unconfirmed)).unwrap();
+        assert_eq!(notice.heading, LOCATION_CHECK_HEADING);
+        assert!(blocks_tailoring(&[unconfirmed]));
         let spoken = SavedItem {
             verdict: "met".into(),
             ..missing(matcher::LANGUAGE, "Danish")
         };
-        assert!(!misses_a_language(&[spoken]));
+        assert!(!blocks_tailoring(&[spoken]));
     }
 }

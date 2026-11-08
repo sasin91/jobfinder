@@ -139,14 +139,14 @@ pub async fn quick_match(
     let job = seniority::with_level(reader.job(job_text));
     let profile = reader.cv(cv_text);
     let matcher = Matcher::new(taxonomy, profile.clone(), reader.known.clone());
-    let groups = matcher::criteria(&job);
+    let groups = matcher::criteria_for_post(&job, job_text);
     let mut verdicts = Verdicts::new();
     for unit in matcher::units(&groups) {
         let verdict = matcher.decide(unit).unwrap_or_else(not_found_verdict);
         verdicts.insert(unit.id.clone(), verdict);
     }
     let verdicts = matcher::combine(&groups, &verdicts);
-    if groups.values().all(Vec::is_empty) {
+    if groups.iter().all(|(criterion, items)| criterion == matcher::LOCATION || items.is_empty()) {
         return Err(ServiceError::new(
             ErrorKind::Invalid,
             "The free match found no skills it knows in this post. The AI match reads requirements written as sentences too.",

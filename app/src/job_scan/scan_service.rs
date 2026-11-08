@@ -1258,9 +1258,7 @@ async fn match_claimed(
         return Ok(false);
     }
     let mut errors = Vec::new();
-    // A job in a language the user doesn't speak gets nothing written, whatever the search's
-    // score to tailor from: a letter they can't read is no use to them.
-    let good = tailors(saved.score, post.tailor_from_score) && !disqualifier_notice::misses_a_language(&saved.items);
+    let good = tailors(saved.score, post.tailor_from_score) && !disqualifier_notice::blocks_tailoring(&saved.items);
     if good {
         errors.extend(write_document(context, &saved, RESUME, timeline).await);
         errors.extend(write_document(context, &saved, APPLICATION, timeline).await);

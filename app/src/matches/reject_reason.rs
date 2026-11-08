@@ -3,7 +3,7 @@
 //! person's own note; 'other' needs one.
 
 /// The reasons, in the order the form lists them.
-pub const REASONS: [(&str, &str); 9] = [
+pub const REASONS: [(&str, &str); 10] = [
     ("applied", "Already applied to this position"),
     ("commute", "Too long commute"),
     ("salary", "Salary"),
@@ -12,6 +12,7 @@ pub const REASONS: [(&str, &str); 9] = [
     ("language", "Language"),
     ("company", "The company"),
     ("job_type", "Hours or contract"),
+    ("irrelevant", "Irrelevant"),
     ("other", "Other"),
 ];
 
