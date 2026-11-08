@@ -6,9 +6,9 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HWND, WIN32_ERROR,
 };
 use windows::Win32::System::Performance::{
-    PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER,
-    PDH_HQUERY, PDH_MORE_DATA, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW,
+    PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_MORE_DATA, PDH_RAW_COUNTER, PDH_RAW_COUNTER_ITEM_W, PdhAddEnglishCounterW, PdhCalculateCounterFromRawValue,
+    PdhCloseQuery, PdhCollectQueryData, PdhGetRawCounterArrayW, PdhOpenQueryW,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW,
@@ -23,6 +23,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::gpu;
@@ -141,10 +142,11 @@ impl Default for GpuWatch {
     }
 }
 
-/// An open counter query and its counter.
+/// An open counter query and the last raw values by GPU engine instance.
 struct GpuCounters {
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
+    previous: HashMap<String, PDH_RAW_COUNTER>,
 }
 
 // SAFETY: the handles are PDH's, used by one thread at a time (GameMode's lock), and PDH's
@@ -164,14 +166,13 @@ impl GpuWatch {
     /// plays. JobFinder itself and the programs gpu::NOT_GAMES names don't count. When the
     /// counters couldn't be opened with the app, they're opened now and read from the next look.
     pub fn heavy_app(&mut self) -> Result<Option<Playing>, String> {
-        let Some(counters) = &self.counters else {
+        let Some(counters) = &mut self.counters else {
             self.counters = Some(GpuCounters::open()?);
             return Ok(None);
         };
         let shares = counters.read()?;
-        let pairs = shares.iter().map(|(instance, share)| (instance.as_str(), *share));
         let this_app = std::process::id();
-        for (process_id, share) in gpu::busiest_processes(pairs) {
+        for (process_id, share) in gpu::busiest_processes(shares) {
             if share < gpu::GAME_SHARE {
                 break;
             }
@@ -198,6 +199,7 @@ impl GpuCounters {
         let mut counters = GpuCounters {
             query,
             counter: PDH_HCOUNTER::default(),
+            previous: HashMap::new(),
         };
         let path = HSTRING::from(GPU_ENGINE_COUNTER);
         // SAFETY: the query is open, and counter outlives the call.
@@ -205,51 +207,69 @@ impl GpuCounters {
             unsafe { PdhAddEnglishCounterW(counters.query, &path, 0, &mut counters.counter) },
             "add",
         )?;
-        counters.sample()?;
+        counters.previous = counters.sample()?;
         Ok(counters)
     }
 
-    fn sample(&self) -> Result<(), String> {
+    fn sample(&self) -> Result<HashMap<String, PDH_RAW_COUNTER>, String> {
         // SAFETY: the query is open.
-        pdh(unsafe { PdhCollectQueryData(self.query) }, "sample")
-    }
-
-    /// Each instance's share (percent) since the last sample; instances that weren't there
-    /// then have none yet and are left out.
-    fn read(&self) -> Result<Vec<(String, f64)>, String> {
-        self.sample()?;
+        pdh(unsafe { PdhCollectQueryData(self.query) }, "sample")?;
         let mut bytes = 0u32;
         let mut count = 0u32;
         // SAFETY: asks for the size only; bytes and count outlive the call.
-        let sized = unsafe { PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut bytes, &mut count, None) };
+        let sized = unsafe { PdhGetRawCounterArrayW(self.counter, &mut bytes, &mut count, None) };
         if sized != PDH_MORE_DATA {
             pdh(sized, "size")?;
-            return Ok(Vec::new());
+            return Ok(HashMap::new());
         }
         // u64s, so the items in it are aligned; the instance names follow them in the buffer.
         let mut buffer = vec![0u64; (bytes as usize).div_ceil(size_of::<u64>())];
-        let items = buffer.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+        let items = buffer.as_mut_ptr().cast::<PDH_RAW_COUNTER_ITEM_W>();
         // SAFETY: buffer holds bytes bytes, and the call writes at most that many.
         pdh(
-            unsafe { PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut bytes, &mut count, Some(items)) },
+            unsafe { PdhGetRawCounterArrayW(self.counter, &mut bytes, &mut count, Some(items)) },
             "read",
         )?;
         // SAFETY: the call wrote count items at the start of buffer, whose names point into it.
         let items = unsafe { std::slice::from_raw_parts(items, count as usize) };
-        Ok(items.iter().filter_map(share_of).collect())
+        Ok(items
+            .iter()
+            .filter(|item| valid_counter_data(item.RawValue.CStatus))
+            .filter_map(|item| {
+                // SAFETY: the name is a 0-terminated string in the buffer, which outlives the item.
+                let name = unsafe { item.szName.to_string() }.ok()?;
+                Some((name, item.RawValue))
+            })
+            .collect())
+    }
+
+    /// Each instance's share since the last sample. Formatting instances separately keeps an
+    /// invalid or newly appeared instance from spoiling the entire wildcard read.
+    fn read(&mut self) -> Result<Vec<(&str, f64)>, String> {
+        let previous = std::mem::take(&mut self.previous);
+        self.previous = self.sample()?;
+        Ok(self
+            .previous
+            .iter()
+            .filter_map(|(name, current)| {
+                let older = previous.get(name)?;
+                let mut formatted = PDH_FMT_COUNTERVALUE::default();
+                // SAFETY: the counter is open and both samples and the output outlive the call.
+                let status = unsafe {
+                    PdhCalculateCounterFromRawValue(self.counter, PDH_FMT_DOUBLE, current, older, &mut formatted)
+                };
+                if status != ERROR_SUCCESS.0 || !valid_counter_data(formatted.CStatus) {
+                    return None;
+                }
+                // SAFETY: the successful call wrote the requested PDH_FMT_DOUBLE value.
+                Some((name.as_str(), unsafe { formatted.Anonymous.doubleValue }))
+            })
+            .collect())
     }
 }
 
-/// An item's instance name and share, or None when it has no valid value yet.
-fn share_of(item: &PDH_FMT_COUNTERVALUE_ITEM_W) -> Option<(String, f64)> {
-    if item.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && item.FmtValue.CStatus != PDH_CSTATUS_NEW_DATA {
-        return None;
-    }
-    // SAFETY: the name is a 0-terminated string in the read's buffer, which outlives the item.
-    let name = unsafe { item.szName.to_string() }.ok()?;
-    // SAFETY: the value was asked for as PDH_FMT_DOUBLE.
-    let share = unsafe { item.FmtValue.Anonymous.doubleValue };
-    Some((name, share))
+fn valid_counter_data(status: u32) -> bool {
+    matches!(status, PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA)
 }
 
 /// Ok for ERROR_SUCCESS, else what PDH said while doing what.
