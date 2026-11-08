@@ -423,30 +423,8 @@ pub async fn list_matches(
     list: &str,
     sort_order: SortOrder,
 ) -> sqlx::Result<Batch> {
-    let place = score_cursor::place(after);
-    let after_score = place.as_ref().map(|place| place.score);
-    let after_at = place.as_ref().map(|place| place.at);
-    let after_id = place.as_ref().map(|place| place.id);
-    let applied = applied_statuses_json();
     // One more than the batch, to tell whether another batch follows.
-    let fetch = limit as i64 + 1;
-    let mut rows: Vec<ListedMatch> = sqlx::query_file_as!(
-        ListedRow,
-        "queries/match_model/best_first.sql",
-        JOBNET_JOBLOG,
-        list,
-        applied,
-        after_score,
-        after_at,
-        after_id,
-        fetch,
-        sort_order as i32,
-    )
-    .fetch_all(db)
-    .await?
-    .into_iter()
-    .map(ListedMatch::from)
-    .collect();
+    let mut rows = list_rows(db, limit as i64 + 1, after, list, sort_order).await?;
     let mut next = None;
     if rows.len() > limit {
         rows.truncate(limit);
@@ -463,6 +441,40 @@ pub async fn list_matches(
         row.rejections = by_match.remove(&row.id).unwrap_or_default();
     }
     Ok(Batch { rows, next })
+}
+
+/// The full shortlist for the browser's application picker. SQLite's LIMIT -1 reads all rows.
+pub(super) async fn shortlist(db: &SqlitePool, sort: SortOrder) -> sqlx::Result<Vec<ListedMatch>> {
+    list_rows(db, -1, "", SHORTLIST, sort).await
+}
+
+async fn list_rows(
+    db: &SqlitePool,
+    limit: i64,
+    after: &str,
+    list: &str,
+    sort: SortOrder,
+) -> sqlx::Result<Vec<ListedMatch>> {
+    let place = score_cursor::place(after);
+    let after_score = place.as_ref().map(|place| place.score);
+    let after_at = place.as_ref().map(|place| place.at);
+    let after_id = place.as_ref().map(|place| place.id);
+    let applied = applied_statuses_json();
+    let rows = sqlx::query_file_as!(
+        ListedRow,
+        "queries/match_model/best_first.sql",
+        JOBNET_JOBLOG,
+        list,
+        applied,
+        after_score,
+        after_at,
+        after_id,
+        limit,
+        sort as i32,
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(ListedMatch::from).collect())
 }
 
 /// How many matches each list (LISTS) holds, in LISTS's order, as (list, count).

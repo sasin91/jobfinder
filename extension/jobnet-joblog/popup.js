@@ -26,7 +26,8 @@ const applied = document.getElementById("applied");
 // Words a company's name ends with that say nothing about which company it is.
 const LEGAL_FORMS = ["as", "aps", "is", "ps", "ks", "ivs", "amba", "inc", "ltd", "llc", "gmbh", "ab", "oy"];
 // How much each sign that the page belongs to a match counts.
-const SAME_POST = 4;
+const SAME_POST = 8;
+const JOB_IN_TITLE = 4;
 const COMPANY_IN_ADDRESS = 2;
 const COMPANY_IN_TITLE = 1;
 
@@ -73,26 +74,27 @@ function place(url) {
   }
 }
 
-// How likely the page is the match's: its post's address (the form's address
-// usually starts with it), and the company in the address or the title.
+// How likely the page is the match's: its post's address, job title, and company.
 function likeness(match, tab) {
   const page = place(tab.url);
   const post = place(match.job_url ?? "");
   const host = new URL(tab.url).host.toLowerCase();
   const title = (tab.title ?? "").toLowerCase();
+  const job = (match.job_title ?? "").trim().toLowerCase();
   const company = words(match.company);
   let score = 0;
   if (post && (page.startsWith(post) || post.startsWith(page))) score += SAME_POST;
+  if (job && title.includes(job)) score += JOB_IN_TITLE;
   if (company.some((word) => host.includes(word))) score += COMPANY_IN_ADDRESS;
   if (company.some((word) => title.includes(word))) score += COMPANY_IN_TITLE;
   return score;
 }
 
 async function showMatches(tab) {
-  const { matches, not_joblogged } = await ask({ type: "matches" });
+  const { matches, not_joblogged } = await ask({ type: "matches", shortlist: true });
   const seen = new Set();
   const all = [...matches, ...not_joblogged].filter((match) => !seen.has(match.id) && seen.add(match.id));
-  if (all.length === 0) throw new Error("No saved matches yet: match the job post in JobFinder first.");
+  if (all.length === 0) throw new Error("No matches available. Check Saved matches in JobFinder.");
   matchList.replaceChildren(
     ...all.map((match) => new Option([match.job_title, match.company].filter(Boolean).join(" · ") || `Match ${match.id}`, String(match.id))),
   );

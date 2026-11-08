@@ -18,6 +18,7 @@ use crate::game_mode::GameMode;
 use crate::job_sites::signed_in::SignedInBrowser;
 use crate::laya::laya_client::LayaClient;
 use crate::llama::llama_server::LlamaServer;
+use crate::matches::match_model::SortOrder;
 use crate::matches::match_service;
 use crate::matches::page_reader::Readers;
 use crate::notifications::Toasts;
@@ -34,6 +35,8 @@ pub struct Context {
     pub key_vault: KeyVault,
     /// When the pages fetch_job read in its window were fetched, oldest first (unix seconds).
     fetches: Mutex<Vec<i64>>,
+    /// The order chosen in Saved matches, also used by the browser's application picker.
+    saved_match_sort: RwLock<SortOrder>,
     /// Where the Jobnet extension was written for the browser to load, or why it couldn't be.
     pub extension_folder: Result<PathBuf, String>,
     /// Laya's model, when its folder has one.
@@ -83,6 +86,7 @@ impl Context {
             taxonomy: RwLock::new(taxonomy),
             key_vault,
             fetches: Mutex::new(Vec::new()),
+            saved_match_sort: RwLock::default(),
             extension_folder: Err("The extension wasn't written out.".to_string()),
             laya: None,
             llama: None,
@@ -110,6 +114,14 @@ impl Context {
 
     pub fn db(&self) -> &SqlitePool {
         &self.db
+    }
+
+    pub fn saved_match_sort(&self) -> SortOrder {
+        *self.saved_match_sort.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn set_saved_match_sort(&self, sort: SortOrder) {
+        *self.saved_match_sort.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = sort;
     }
 
     /// The taxonomy now.

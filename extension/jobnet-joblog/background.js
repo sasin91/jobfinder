@@ -8,6 +8,7 @@
 // Messages: {type: "matches"} gives the saved matches as match/history
 // does: {matches (newest first), not_joblogged (applied for, not in Jobnet's
 // joblog yet)};
+// add shortlist: true for the application picker's shortlist in the app's order;
 // {type: "joblog", id} the joblog entry of one (match/joblog/{id}), with
 // CVR's address when the post has none (withCvrAddress);
 // {type: "pdf", id, kind} one of its PDFs as {name, base64};
@@ -70,7 +71,8 @@ async function call(path, options = {}) {
 
 async function answer(message) {
   if (message.type === "matches") {
-    const { matches, not_joblogged } = await (await call("match/history")).json();
+    const path = message.shortlist ? "match/history?shortlist=true" : "match/history";
+    const { matches, not_joblogged } = await (await call(path)).json();
     return { matches, not_joblogged: not_joblogged ?? [] };
   }
   if (message.type === "logged") {

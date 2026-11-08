@@ -548,6 +548,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                 && state.list.sort != order
             {
                 state.list.sort = order;
+                runner.context.set_saved_match_sort(order);
                 return reload_list(state, list, runner);
             }
         }

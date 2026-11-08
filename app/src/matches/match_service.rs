@@ -242,6 +242,10 @@ pub struct ExtensionHistory {
     pub not_joblogged: Vec<ListedMatch>,
 }
 
+pub async fn application_shortlist(context: &Context) -> Result<Vec<ListedMatch>, ServiceError> {
+    Ok(match_model::shortlist(context.db(), context.saved_match_sort()).await?)
+}
+
 pub async fn extension_history(context: &Context) -> Result<ExtensionHistory, ServiceError> {
     let db = context.db();
     Ok(ExtensionHistory {

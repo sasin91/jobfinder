@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -35,10 +35,21 @@ fn id_in_body(id: &serde_json::Value) -> i64 {
     }
 }
 
-/// GET match/history: the saved matches: matches, the latest ones, newest first; not_joblogged,
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    #[serde(default)]
+    shortlist: bool,
+}
+
+/// GET match/history?shortlist=true gives the application picker the app's shortlist and order.
+/// Without that flag: matches, the latest ones, newest first; not_joblogged,
 /// the ones applied for but not in Jobnet's joblog yet (the list "Applied, not on Jobnet yet"),
 /// best first, which the extension offers first.
-pub async fn history(State(state): State<Arc<AppState>>) -> Answer {
+pub async fn history(State(state): State<Arc<AppState>>, Query(query): Query<HistoryQuery>) -> Answer {
+    if query.shortlist {
+        let matches = match_service::application_shortlist(&state.context).await?;
+        return Ok(Json(json!({ "matches": matches })).into_response());
+    }
     let history = match_service::extension_history(&state.context).await?;
     Ok(Json(json!({ "matches": history.matches, "not_joblogged": history.not_joblogged })).into_response())
 }

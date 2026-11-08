@@ -11,6 +11,8 @@ use jobfinder::account::key_vault::KeyVault;
 use jobfinder::context::Context;
 use jobfinder::db;
 use jobfinder::job_scan::search_service::{self, SearchForm};
+use jobfinder::matches::match_model::{SHORTLIST, SortOrder};
+use jobfinder::matches::match_service;
 use jobfinder::server::{self, AppState};
 use jobfinder::taxonomy::Taxonomy;
 use serde_json::{Value, json};
@@ -211,6 +213,53 @@ async fn the_joblog_is_filled_in_from_the_saved_match() {
     let (status, answer) = send(get("/match/joblog/99")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(answer, r#"{"error":"That saved match was not found."}"#);
+}
+
+#[tokio::test]
+async fn the_application_picker_matches_the_full_desktop_shortlist() {
+    let db = seeded().await;
+    db.execute(sqlx::raw_sql(
+        "WITH RECURSIVE ids(id) AS (SELECT 100 UNION ALL SELECT id + 1 FROM ids WHERE id < 155)
+         INSERT INTO matches (id, job_title, company, job_text, score, points, max_points, tag, created_at)
+         SELECT id, 'Developer', 'Acme', '', CASE id % 3 WHEN 0 THEN 1.0 WHEN 1 THEN 0.9 ELSE 0.8 END,
+                9, 10, 'top', 1760000000 + id / 2
+         FROM ids;
+         UPDATE matches SET closed_at = 1 WHERE id = 100;
+         UPDATE matches SET tag = 'poor' WHERE id = 101;
+         INSERT INTO match_integrations (match_id, integration, status, created_at, updated_at)
+         VALUES (102, 'jobnet_joblog', 'Soegt', 1, 1);",
+    ))
+    .await
+    .unwrap();
+    let context = Arc::new(Context::new(db, TAXONOMY.clone(), KeyVault::with_key_in_memory()));
+    let app = server::router(Arc::new(AppState::new(Arc::clone(&context), PORT)));
+
+    for sort in [SortOrder::Best, SortOrder::Newest, SortOrder::Oldest] {
+        context.set_saved_match_sort(sort);
+        let mut expected = Vec::new();
+        let mut after = String::new();
+        loop {
+            let page = match_service::sorted_saved_matches(&context, Some(SHORTLIST), &after, sort)
+                .await
+                .unwrap();
+            expected.extend(page.matches.into_iter().map(|row| row.id));
+            let Some(next) = page.next_after else { break };
+            after = next;
+        }
+        assert_eq!(expected.len(), 54);
+        assert!([22, 100, 101, 102].iter().all(|id| !expected.contains(id)));
+
+        let (status, body) = send_to(&app, get("/match/history?shortlist=true")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: Value = serde_json::from_str(&body).unwrap();
+        let ids: Vec<_> = answer["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "{sort:?}");
+    }
 }
 
 #[tokio::test]
