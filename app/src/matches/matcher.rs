@@ -205,9 +205,14 @@ impl<'a> Matcher<'a> {
     pub fn decide(&self, item: &Item) -> Option<Verdict> {
         if item.kind == LOCATION {
             if item.id == UNCONFIRMED_WORKPLACE_ID
-                || item.english.as_deref().is_some_and(|text| text.to_lowercase().contains("office location not stated"))
+                || item
+                    .english
+                    .as_deref()
+                    .is_some_and(|text| text.to_lowercase().contains("office location not stated"))
             {
-                return Some(location_to_check("Check where the office is and whether the commute works for you."));
+                return Some(location_to_check(
+                    "Check where the office is and whether the commute works for you.",
+                ));
             }
             if self.profile.location.trim().is_empty() {
                 return Some(location_to_check("The CV is missing your home location."));
@@ -524,7 +529,9 @@ pub fn criteria(job: &Job) -> Groups {
 /// reader returned no required location.
 pub(super) fn criteria_for_post(job: &Job, post: &str) -> Groups {
     let mut groups = criteria(job);
-    if !groups.contains_key(LOCATION) && let Some(label) = OFFICE_LABEL.captures(post) {
+    if !groups.contains_key(LOCATION)
+        && let Some(label) = OFFICE_LABEL.captures(post)
+    {
         groups.insert(
             LOCATION.into(),
             vec![Item {
@@ -744,9 +751,12 @@ pub fn score(groups: &Groups, verdicts: &Verdicts) -> Score {
     let mut index = if total > 0 { rank as f64 / total as f64 } else { 0.0 };
     if !missed_disqualifiers(groups, verdicts).is_empty() {
         index = index.min(DISQUALIFIED_INDEX);
-    } else if groups.get(LOCATION).into_iter().flatten().any(|item| {
-        verdicts.get(&item.id).is_none_or(|verdict| verdict.verdict != "met")
-    }) {
+    } else if groups
+        .get(LOCATION)
+        .into_iter()
+        .flatten()
+        .any(|item| verdicts.get(&item.id).is_none_or(|verdict| verdict.verdict != "met"))
+    {
         index = index.min(UNCONFIRMED_LOCATION_INDEX);
     }
     Score {
@@ -799,7 +809,10 @@ mod tests {
 
     #[test]
     fn a_hybrid_label_without_a_workplace_requires_a_commute_check() {
-        let job = Job { job_title: "Senior Backend Engineer".into(), ..Job::default() };
+        let job = Job {
+            job_title: "Senior Backend Engineer".into(),
+            ..Job::default()
+        };
         let post = "Senior Backend Engineer (PHP)\r\n\r\nUp to €6.5K/month | 📍Hybrid | PHP (Symfony)";
         let groups = criteria_for_post(&job, post);
         let workplace = &groups[LOCATION][0];
@@ -809,7 +822,10 @@ mod tests {
         assert_eq!(workplace_verdict.verdict, "partial");
         let verdicts = Verdicts::from([
             (workplace.id.clone(), workplace_verdict),
-            ("t0".into(), verdict_of("met", "taxonomy", "exact", String::new(), String::new())),
+            (
+                "t0".into(),
+                verdict_of("met", "taxonomy", "exact", String::new(), String::new()),
+            ),
         ]);
         assert_eq!(score(&groups, &verdicts).index, UNCONFIRMED_LOCATION_INDEX);
         assert!(!criteria_for_post(&job, "Senior Backend Engineer | Fully remote").contains_key(LOCATION));
@@ -818,19 +834,24 @@ mod tests {
     #[test]
     fn total_experience_does_not_decide_a_scoped_minimum() {
         let taxonomy = Taxonomy::from_records(vec![]);
-        let profile = Profile { experience_years: 9, ..Profile::default() };
+        let profile = Profile {
+            experience_years: 9,
+            ..Profile::default()
+        };
         let matcher = Matcher::new(&taxonomy, profile, IndexMap::new());
         let job = Job {
             requirements: [
                 "2 years in a senior role making architecture decisions",
                 "2 years of experience",
-            ].map(|value| super::super::Requirement {
+            ]
+            .map(|value| super::super::Requirement {
                 value: value.into(),
                 kind: "experience".into(),
                 required: true,
                 min_years: 2,
                 ..Default::default()
-            }).to_vec(),
+            })
+            .to_vec(),
             ..Job::default()
         };
         let groups = criteria(&job);

@@ -143,7 +143,9 @@ pub async fn judge(
     let list = items
         .iter()
         .map(|item| {
-            let minimum = item.min_years.filter(|&years| years > 0)
+            let minimum = item
+                .min_years
+                .filter(|&years| years > 0)
                 .map_or_else(String::new, |years| format!(" (minimum {years} years in this scope)"));
             format!("- [{}] ({}) {}{minimum}", item.id, item.kind, item.text)
         })

@@ -106,7 +106,10 @@ pub async fn ai_match(
                     let verdict = grounded_verdict(&unit, answer, &cv_for_evidence);
                     verdicts.insert(unit.id, verdict);
                 } else if unit.kind == LOCATION {
-                    verdicts.insert(unit.id, matcher::location_to_check("The match could not verify the commute."));
+                    verdicts.insert(
+                        unit.id,
+                        matcher::location_to_check("The match could not verify the commute."),
+                    );
                 }
             }
         }

@@ -146,7 +146,10 @@ pub async fn quick_match(
         verdicts.insert(unit.id.clone(), verdict);
     }
     let verdicts = matcher::combine(&groups, &verdicts);
-    if groups.iter().all(|(criterion, items)| criterion == matcher::LOCATION || items.is_empty()) {
+    if groups
+        .iter()
+        .all(|(criterion, items)| criterion == matcher::LOCATION || items.is_empty())
+    {
         return Err(ServiceError::new(
             ErrorKind::Invalid,
             "The free match found no skills it knows in this post. The AI match reads requirements written as sentences too.",

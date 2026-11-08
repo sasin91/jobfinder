@@ -117,11 +117,17 @@ impl Context {
     }
 
     pub fn saved_match_sort(&self) -> SortOrder {
-        *self.saved_match_sort.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self
+            .saved_match_sort
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn set_saved_match_sort(&self, sort: SortOrder) {
-        *self.saved_match_sort.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = sort;
+        *self
+            .saved_match_sort
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = sort;
     }
 
     /// The taxonomy now.
