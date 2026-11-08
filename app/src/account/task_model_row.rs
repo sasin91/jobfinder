@@ -174,7 +174,17 @@ mod tests {
         let rows = rows(&[llama, openai], &saved_models, &downloaded);
 
         let tasks: Vec<&str> = rows.iter().map(|row| row.task).collect();
-        assert_eq!(tasks, ["read_job", "read_cv", "judge", "application", "resume"]);
+        assert_eq!(
+            tasks,
+            [
+                "read_job",
+                "read_cv",
+                "judge",
+                "application",
+                "application_form",
+                "resume"
+            ]
+        );
         let read_job = &rows[0];
         assert!(read_job.picks_a_file);
         let labels: Vec<&str> = read_job.choices.iter().map(|choice| choice.label.as_str()).collect();
@@ -198,7 +208,7 @@ mod tests {
         let application = &rows[3];
         assert!(!application.picks_a_file && application.choices.is_empty());
         assert_eq!(application.keys_own, "Same as the key (gpt-5.4-mini)");
-        let resume = &rows[4];
+        let resume = &rows[5];
         assert_eq!(resume.choices.len(), 3, "no default to offer");
         assert_eq!(
             selected(resume),

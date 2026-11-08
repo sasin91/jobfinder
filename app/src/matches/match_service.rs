@@ -1159,7 +1159,7 @@ pub async fn application_form(
     if plan.for_model.is_empty() {
         return Ok(plan.answers);
     }
-    let answered = match llm_key::llm(context, task_model::writing(document_box::APPLICATION)).await {
+    let answered = match llm_key::llm(context, &task_model::APPLICATION_FORM).await {
         Ok(keyed) => {
             let what = format!("Answering the application form for {}", job_label(&found));
             let asking = application_form::ask(db, &found, &keyed, &plan.for_model, &letter);

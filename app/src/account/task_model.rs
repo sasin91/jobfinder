@@ -9,6 +9,7 @@
 //! - read_cv: reading a CV for the match (match_service::extract_cv); job_evaluation.
 //! - judge: judging the requirements the taxonomy can't decide (ai_match); job_evaluation.
 //! - application: writing an application (document_writer); application.
+//! - application_form: answering questions on an employer's application form; application.
 //! - resume: tailoring a résumé (document_writer), and reading a CV into the profile
 //!   (profile_fill), which runs on the résumé key; resume.
 //!
@@ -69,6 +70,13 @@ pub const APPLICATION_TASK: Task = Task {
     llama_default: None,
 };
 
+pub const APPLICATION_FORM: Task = Task {
+    name: "application_form",
+    use_: APPLICATION,
+    label: "Answering application form questions",
+    llama_default: Some(QWEN3_4B),
+};
+
 pub const RESUME_TASK: Task = Task {
     name: "resume",
     use_: RESUME,
@@ -77,7 +85,14 @@ pub const RESUME_TASK: Task = Task {
 };
 
 /// Every task, in the order the pages list them.
-pub const TASKS: [Task; 5] = [READ_JOB, READ_CV, JUDGE, APPLICATION_TASK, RESUME_TASK];
+pub const TASKS: [Task; 6] = [
+    READ_JOB,
+    READ_CV,
+    JUDGE,
+    APPLICATION_TASK,
+    APPLICATION_FORM,
+    RESUME_TASK,
+];
 
 /// The task that writes kind (document_box::APPLICATION or RESUME).
 pub fn writing(kind: &str) -> &'static Task {
@@ -176,6 +191,7 @@ mod tests {
         assert_eq!(model_for(&READ_CV, LLAMA_CPP, key_model, ""), QWEN3_4B);
         assert_eq!(model_for(&JUDGE, LLAMA_CPP, key_model, ""), QWEN3_4B);
         assert_eq!(model_for(&APPLICATION_TASK, LLAMA_CPP, key_model, ""), key_model);
+        assert_eq!(model_for(&APPLICATION_FORM, LLAMA_CPP, key_model, ""), QWEN3_4B);
         assert_eq!(model_for(&RESUME_TASK, LLAMA_CPP, "", ""), "");
     }
 

@@ -118,8 +118,10 @@ app/src/matches/application_form.rs):
   upload the tailored résumé (the CV the match was made with when there is
   none); a cover letter text box gets the application's text;
 - the questions ("What made you interested in us?", a team to pick) are
-  answered by the model that writes your applications, from the CV, the post
-  and the application. It leaves empty what they don't say (salary, notice
+  answered from the CV, the post and the application. Choose the model under
+  "Answering application form questions" in Settings → Language models.
+  It uses the application key and defaults to Qwen3 4B for JobFinder's built-in
+  local provider. It leaves empty what the documents don't say (salary, notice
   period, start date), and a choice is always one of the form's own options.
 
 Once you have sent the form, press "I sent it: mark as applied" in the box:

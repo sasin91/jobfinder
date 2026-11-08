@@ -4,7 +4,7 @@
 //! contact fields come from the profile, the uploads are the match's PDFs (the written
 //! application, the tailored résumé or the CV), a cover letter box gets the written
 //! application, and the questions ("What made you interested in Famly?", "Which team?") are
-//! answered by the model that writes applications, from the CV, the post and the application.
+//! answered by the form's model, from the CV, the post and the application.
 //! A consent box is never ticked, and nothing is sent: the candidate reads the form and sends it.
 
 use std::collections::HashSet;
@@ -525,7 +525,7 @@ fn schema() -> Value {
     })
 }
 
-/// Asks the model that writes applications to answer fields for saved match found, with the
+/// Asks the form's model to answer fields for saved match found, with the
 /// letter written for it (application_text, "" when there is none).
 pub async fn ask(
     db: &SqlitePool,
