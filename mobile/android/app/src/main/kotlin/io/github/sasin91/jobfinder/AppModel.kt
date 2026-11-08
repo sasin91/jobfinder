@@ -357,7 +357,8 @@ class AppModel(application: Application) : AndroidViewModel(application) {
         val client = client() ?: return
         session.launch {
             try {
-                _send.update { it.copy(evaluations = client.evaluations().evaluations) }
+                val evaluations = client.evaluations().evaluations
+                _send.update { it.copy(evaluations = evaluations) }
                 pollWhileWorking()
             } catch (e: DeviceError) {
                 failed(e) { why -> _send.update { it.copy(error = why) } }
@@ -374,7 +375,8 @@ class AppModel(application: Application) : AndroidViewModel(application) {
                 delay(EVALUATIONS_POLL_MS)
                 val client = client() ?: break
                 try {
-                    _send.update { it.copy(evaluations = client.evaluations().evaluations) }
+                    val evaluations = client.evaluations().evaluations
+                    _send.update { it.copy(evaluations = evaluations) }
                 } catch (e: DeviceError) {
                     failed(e) { why -> _send.update { it.copy(error = why) } }
                     break

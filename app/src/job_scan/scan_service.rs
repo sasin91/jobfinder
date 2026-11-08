@@ -60,6 +60,10 @@ pub const POSTS_PER_SCAN: usize = 15;
 /// between long model calls instead of running flat out for the whole scan.
 const PAUSE_BETWEEN_POSTS: Duration = Duration::from_secs(10);
 
+/// A failed read gets two more tries, ten then twenty seconds later.
+const READ_ATTEMPTS: u32 = 3;
+const READ_RETRY_PAUSE: Duration = Duration::from_secs(10);
+
 /// How long a scan waits for a full-screen app or game to end before it stops (an hour); the
 /// posts left are matched by the next scan.
 const BUSY_GIVE_UP: Duration = Duration::from_secs(3600);
@@ -1190,7 +1194,7 @@ async fn match_claimed(
         Some(page) => Ok(page),
         // A plain fetch isn't work of its own in the task manager: a stop ends it here.
         None => tokio::select! {
-            read = page_reader::read(&post.url, context.readers()) => read,
+            read = retry_read(|| page_reader::read(&post.url, context.readers()), READ_RETRY_PAUSE) => read,
             () = running_work::until_stop_asked() => Err(Stopped::SAID.to_string()),
         },
     };
@@ -1207,13 +1211,15 @@ async fn match_claimed(
         }
         Err(why) => {
             crate::log_line!("job_scan: post {post_id}: {}: {why}", post.url);
-            // A link a scan found that doesn't open is most likely gone, or one the model got
-            // wrong: not a job post to try again.
-            let (status, said) = match post.job_search_run_id {
-                Some(_) => (NOT_A_JOB, "The link the scan found doesn't open: "),
-                None => (FAILED, "The post couldn't be fetched: "),
-            };
-            set(status, format!("{said}{why}"), None, FoundAbout::default()).await?;
+            // A read error says nothing about whether the page contains a job. After the
+            // bounded retries it stays visibly failed, available for Try again.
+            set(
+                FAILED,
+                format!("The post couldn't be fetched: {why}"),
+                None,
+                FoundAbout::default(),
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -1272,6 +1278,25 @@ async fn match_claimed(
 /// or the browser reading it (whose error says so).
 fn read_was_stopped(why: &str) -> bool {
     running_work::stop_asked() || why.contains(Stopped::SAID)
+}
+
+async fn retry_read<T, F, Fut>(mut read: F, pause: Duration) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    for attempt in 1..=READ_ATTEMPTS {
+        running_work::until_resumed().await;
+        if running_work::stop_asked() {
+            return Err(Stopped::SAID.to_string());
+        }
+        match read().await {
+            Ok(page) => return Ok(page),
+            Err(why) if attempt == READ_ATTEMPTS || read_was_stopped(&why) => return Err(why),
+            Err(_) => tokio::time::sleep(pause * attempt).await,
+        }
+    }
+    unreachable!("the last read returns its result")
 }
 
 /// Forever, while a post's match runs: says every KEEP_CLAIM_EVERY that it still runs
@@ -1629,6 +1654,47 @@ fn match_in_background(context: Arc<Context>, post_id: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_temporary_read_failure_is_retried_but_not_forever() {
+        let mut attempts = 0;
+        let page = retry_read(
+            || {
+                attempts += 1;
+                std::future::ready(if attempts == 2 {
+                    Ok("post")
+                } else {
+                    Err("timeout".to_string())
+                })
+            },
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(page, Ok("post"));
+        assert_eq!(attempts, 2);
+        attempts = 0;
+        let failed = retry_read(
+            || {
+                attempts += 1;
+                std::future::ready(Err::<(), _>("offline".to_string()))
+            },
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(failed, Err("offline".to_string()));
+        assert_eq!(attempts, READ_ATTEMPTS);
+        attempts = 0;
+        let stopped = retry_read(
+            || {
+                attempts += 1;
+                std::future::ready(Err::<(), _>(Stopped::SAID.to_string()))
+            },
+            Duration::ZERO,
+        )
+        .await;
+        assert!(stopped.is_err());
+        assert_eq!(attempts, 1);
+    }
 
     fn search() -> model::JobSearch {
         model::JobSearch {

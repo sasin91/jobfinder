@@ -58,7 +58,7 @@
     box.status(`Asking JobFinder about ${fields.list.length} field${fields.list.length === 1 ? "" : "s"}… (the questions can take a minute)`);
     let answered;
     try {
-      answered = await ask({ type: "application_form", id: match.id, fields: fields.list.map(({ element, elements, ...field }) => field) });
+      answered = await ask({ type: "application_form", id: match.id, fields: fields.list.map(({ element, elements, initialState, ...field }) => field) });
     } catch (error) {
       box.line(error.message, "miss");
       box.done();
@@ -72,6 +72,7 @@
         if (answer.file) {
           box.status(`Getting the PDF for "${named(field)}"…`);
           const pdf = await ask({ type: "pdf", id: match.id, kind: answer.file });
+          requireUnchanged(field);
           attach(field.element, pdf);
           mark(field, FILLED_OUTLINE);
           box.line(`${named(field)}: ${pdf.name} (${answer.from})`, "ok", field);
@@ -169,6 +170,7 @@
       for (const element of elements) element.dataset.jobfinderKey = group.key;
       list.push(group);
     }
+    for (const field of list) field.initialState = fieldState(field);
     return { list, kept };
   }
 
@@ -242,7 +244,24 @@
 
   // ---------- filling in ----------
 
+  function fieldState(field) {
+    return JSON.stringify((field.elements ?? [field.element]).map((element) => ({
+      value: element.value,
+      checked: element.checked,
+      files: [...(element.files ?? [])].map((file) => [file.name, file.size, file.lastModified]),
+    })));
+  }
+
+  function requireUnchanged(field) {
+    const elements = field.elements ?? [field.element];
+    if (elements.some((element) => !element.isConnected || element.disabled || element.readOnly)
+        || fieldState(field) !== field.initialState) {
+      throw new Error("changed while waiting: kept your answer");
+    }
+  }
+
   function fillField(field, value) {
+    requireUnchanged(field);
     const element = field.element;
     if (field.kind === "radio" || field.kind === "checkboxes") {
       const wanted = field.kind === "radio" ? [value] : value.split("\n");

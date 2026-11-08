@@ -226,6 +226,11 @@ It needs [watchexec](https://github.com/watchexec/watchexec) once:
 
 Stop it with Ctrl+C.
 
+JobFinder normally uses one local SQLite database. `--database` is a development/testing
+override, not a profile-switching feature. Use a separate test folder to isolate downloaded
+models and browser data too. Existing recordings for a renamed test database are copied into
+its own folder on startup; the old copies are retained because they may belong to the normal database.
+
 ## Trying it out
 
 With a real key saved on Language models, check these by hand after a change:

@@ -151,7 +151,10 @@ impl GameMode {
 
     #[cfg(test)]
     pub(crate) fn cache_detection_for_test(&self, playing: Option<Playing>) {
-        self.watch.lock().unwrap().last_look = Some(Look { at: Instant::now(), playing });
+        self.watch.lock().unwrap().last_look = Some(Look {
+            at: Instant::now(),
+            playing,
+        });
     }
 
     /// Whether a game runs now (why_running).

@@ -54,7 +54,9 @@ const GONE_FLAG_WITH_VALUE: &str = "--tailscale-name";
 const USAGE: &str = "usage: jobfinder [--port <port>] [--database <file>] [--laya <folder>] [--llama <folder>]
        jobfinder scan [--database <file>]
        jobfinder cleanup [--database <file>]
-       jobfinder read-pdf   (a PDF on stdin, its text on stdout; the app runs it)";
+       jobfinder read-pdf   (a PDF on stdin, its text on stdout; the app runs it)
+
+JobFinder uses one local SQLite database. --database overrides its path for development/testing.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -561,7 +563,11 @@ fn app_context(
         llama_folder.display()
     );
     context.whisper = Some(Whisper::new(&data_folder.join(whisper::FOLDER), &inventory));
-    context.recordings_folder = Some(recordings::folder_for(database));
+    context.recordings_folder = Some(
+        runtime
+            .block_on(recordings::prepare_folder(context.db(), database))
+            .map_err(|why| format!("Couldn't prepare the recordings folder: {why}"))?,
+    );
     context.llama = Some(LlamaServer::new(&llama_folder, inventory));
     context.signed_in = Some(SignedInBrowser::new(data_folder.join(signed_in::FOLDER)));
     Ok(context)

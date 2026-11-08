@@ -252,11 +252,8 @@ pub fn remove_database(found: &Found) -> Vec<String> {
                 .map(|e| format!("{}: {e}", file.display()))
         })
         .collect();
-    let recordings = found
-        .database_files
-        .first()
-        .map(|database| crate::recordings::folder_for(database));
-    if let Some(recordings) = recordings.filter(|folder| folder.is_dir()) {
+    let recordings = crate::recordings::folder_for(&found.database);
+    if recordings.is_dir() {
         if let Err(e) = std::fs::remove_dir_all(&recordings) {
             failed.push(format!("{}: {e}", recordings.display()));
         }

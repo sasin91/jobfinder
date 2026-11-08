@@ -133,6 +133,8 @@ pub struct Overview {
 /// started.
 pub struct LlamaServer {
     folder: PathBuf,
+    #[cfg(test)]
+    find_on_path: fn(&str) -> Option<PathBuf>,
     /// Where the models are (models_folder::read), changed by move_models.
     models_folder: std::sync::RwLock<PathBuf>,
     inventory: Inventory,
@@ -153,6 +155,8 @@ impl LlamaServer {
     pub fn new(folder: &Path, inventory: Inventory) -> Self {
         let folder = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
         LlamaServer {
+            #[cfg(test)]
+            find_on_path: on_path,
             models_folder: std::sync::RwLock::new(models_folder::read(&folder)),
             folder,
             inventory,
@@ -208,6 +212,9 @@ impl LlamaServer {
         if own.is_file() {
             return Some(own);
         }
+        #[cfg(test)]
+        return (self.find_on_path)(SERVER_FILE);
+        #[cfg(not(test))]
         on_path(SERVER_FILE)
     }
 
@@ -668,14 +675,15 @@ mod tests {
     #[tokio::test]
     async fn without_the_program_the_folder_is_named() {
         let folder = std::env::temp_dir().join("jobfinder-llama-test-no-server");
-        let server = LlamaServer::new(&folder, Inventory::default());
+        let mut server = LlamaServer::new(&folder, Inventory::default());
+        server.find_on_path = |_| None;
         let why = server.start("").await.unwrap_err();
         assert!(why.starts_with(&format!("There's no {SERVER_FILE} in ")), "{why}");
         assert!(server.folder().is_absolute());
         let relative = LlamaServer::new(Path::new("llama"), Inventory::default());
         assert!(relative.folder().is_absolute() && relative.folder().ends_with("llama"));
         let overview = server.overview();
-        assert_eq!(overview.server.is_some(), on_path(SERVER_FILE).is_some());
+        assert!(overview.server.is_none());
         assert_eq!(
             overview.chosen,
             Err("There's no .gguf model in the models folder yet.".to_string())

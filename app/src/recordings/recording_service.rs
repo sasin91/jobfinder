@@ -259,20 +259,31 @@ fn keep_copy(folder: &Path, picked: &Path, now: i64) -> Result<PathBuf, ServiceE
     std::fs::create_dir_all(folder)
         .map_err(|e| ServiceError::internal(WHERE, format!("Couldn't make {}: {e}", folder.display())))?;
     let name = file_name(picked);
-    let kept_as = (0..)
-        .map(|taken| match taken {
-            0 => folder.join(format!("{now}-{name}")),
-            _ => folder.join(format!("{now}-{taken}-{name}")),
-        })
-        .find(|candidate| !candidate.exists())
-        .unwrap_or_else(|| folder.join(format!("{now}-{name}")));
-    std::fs::copy(picked, &kept_as).map_err(|e| {
+    let copy_error = |e| {
         ServiceError::new(
             ErrorKind::Invalid,
             format!("{} couldn't be copied into {}: {e}", picked.display(), folder.display()),
         )
-    })?;
-    Ok(kept_as)
+    };
+    let mut source = std::fs::File::open(picked).map_err(copy_error)?;
+    for taken in 0_u64.. {
+        let kept_as = match taken {
+            0 => folder.join(format!("{now}-{name}")),
+            _ => folder.join(format!("{now}-{taken}-{name}")),
+        };
+        let mut destination = match std::fs::OpenOptions::new().write(true).create_new(true).open(&kept_as) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(copy_error(e)),
+        };
+        if let Err(e) = std::io::copy(&mut source, &mut destination) {
+            drop(destination);
+            let _ = std::fs::remove_file(&kept_as);
+            return Err(copy_error(e));
+        }
+        return Ok(kept_as);
+    }
+    unreachable!("all recording filenames exhausted")
 }
 
 fn file_name(path: &Path) -> String {
@@ -325,6 +336,33 @@ pub fn available(context: &Context) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_imports_keep_every_recording() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-recordings-race-{}", std::process::id()));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for number in 0_u8..8 {
+            let picked_folder = folder.join(number.to_string());
+            std::fs::create_dir_all(&picked_folder).unwrap();
+            let picked = picked_folder.join("call.wav");
+            std::fs::write(&picked, vec![number; 65536]).unwrap();
+            let kept = folder.join("kept");
+            let barrier = Arc::clone(&barrier);
+            tasks.push(std::thread::spawn(move || {
+                barrier.wait();
+                let path = keep_copy(&kept, &picked, 100).unwrap();
+                (number, path)
+            }));
+        }
+        let mut paths = std::collections::HashSet::new();
+        for task in tasks {
+            let (number, path) = task.join().unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), vec![number; 65536]);
+            assert!(paths.insert(path));
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 
     #[test]
     fn a_kept_copy_never_overwrites_another() {
