@@ -78,8 +78,8 @@ Setup (also under Settings) guides you through six steps and remembers your plac
    or deliberately skip it. Task manager shows work in progress; Job searches shows
    found posts and individual failures. Configured cloud tasks use your API account.
 6. **Schedule:** choose automatic checks or manual scanning, then finish. A new setup
-   remains resumable until you finish explicitly; existing populated databases can
-   revisit Setup without being forced through it.
+   remains resumable until you finish explicitly. Existing users also review
+   onboarding once, with their saved models, profile, searches and matches kept.
 
 **Evaluate again** in Models refreshes hardware and fit estimates without changing
 assignments or downloading anything. **Run local check** loads the assigned downloaded

@@ -70,8 +70,9 @@ working installation, GPU acceleration or desktop integration on these systems.
 Store explicit, versioned onboarding progress per database, including deliberate
 skips. Derive readiness from current configuration too: a previously completed
 step can need attention after its model is removed. Never infer completion solely
-from CV import. Existing populated databases should receive an optional readiness
-review rather than being forced through a new first-run flow.
+from CV import. Every user reviews onboarding once, including existing populated
+databases. Their saved models, profiles, searches and matches remain available;
+explicit completion returns subsequent launches to the dashboard.
 
 ## Task-specific model recommendations
 
@@ -213,7 +214,8 @@ Then repeat distribution-specific acceptance on Ubuntu, Fedora and openSUSE.
 
 The repository now implements a six-stage setup UI with saved stage/choices,
 explicit completion, search/source configuration, optional first scan and manual
-scheduling. Existing databases are grandfathered in by migration 0018.
+scheduling. Migration 0018 starts every database in onboarding, including existing
+users, without resetting their saved data.
 Migration 0018 directly creates typed `onboarding` and `model_assessments`
 columns, with per-task measurements in `model_checks`. Schema migrations track
 storage changes; `evaluation_version` identifies the test criteria.

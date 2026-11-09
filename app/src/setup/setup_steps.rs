@@ -3,7 +3,7 @@
 //! the AI runs on, the profile read from the CV, and the job scan's schedule.
 //!
 //! Completion and deliberate skips are saved per database (progress). Importing a CV does
-//! not finish a new setup; migration 0018 preserves existing populated databases.
+//! not finish setup. Migration 0018 starts every user in onboarding while keeping saved data.
 
 use crate::account::account_model::{self, RESUME};
 use crate::account::model_advice::ModelAdvice;

@@ -5,9 +5,9 @@ CREATE TABLE onboarding (
   skipped_scan INTEGER NOT NULL DEFAULT 0 CHECK (skipped_scan IN (0, 1)),
   current_step INTEGER NOT NULL DEFAULT 0 CHECK (current_step BETWEEN 0 AND 5)
 );
--- Populated databases can revisit setup without being forced through it.
-INSERT INTO onboarding (id, completed)
-SELECT 1, EXISTS (SELECT 1 FROM profile) OR EXISTS (SELECT 1 FROM matches);
+-- Every user reviews onboarding once, including databases with an existing profile
+-- or matches. Saved configuration remains available in the wizard.
+INSERT INTO onboarding (id) VALUES (1);
 
 CREATE TABLE model_assessments (
   id INTEGER PRIMARY KEY CHECK (id = 1),
