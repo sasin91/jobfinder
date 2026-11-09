@@ -1078,7 +1078,7 @@ fn form_view(state: &State, id: i64) -> Element<'_, Msg> {
                 .style(style::text_field)
                 .width(SCORE_WIDTH)
                 .into(),
-            Some("0 to 100. Matches scoring at least this get a tailored résumé and application right away; 60 is a medium match, 80 a good one, 0 tailors every match."),
+            Some("0 to 100, or 101 for manual writing. Matches scoring at least this get a tailored résumé and application right away; 60 is a medium match, 80 a good one, 0 tailors every match."),
         ))
         .push(
             column![

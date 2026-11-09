@@ -18,8 +18,8 @@ const PAGES: [(&str, &str, Screen); 7] = [
         Screen::LanguageModels,
     ),
     (
-        "Local model",
-        "The app's own llama.cpp model: download it and pick one.",
+        "Models",
+        "Which models run each task, why, and Evaluate again.",
         Screen::LocalModel,
     ),
     (
@@ -33,8 +33,8 @@ const PAGES: [(&str, &str, Screen); 7] = [
         Screen::JobSearches,
     ),
     (
-        "Setup",
-        "Your CV, the AI model and the job scan's schedule, step by step.",
+        "Setup wizard",
+        "Revisit guided setup for models, your CV, job sites and scanning.",
         Screen::Setup,
     ),
     ("Jobnet extension", "How to load it in Edge.", Screen::JoblogExtension),

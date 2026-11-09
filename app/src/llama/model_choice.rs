@@ -99,11 +99,11 @@ pub fn card_usable(inventory: &Inventory, libraries: &[&str]) -> Result<bool, St
     }
     match gpu.vendor {
         GpuVendor::Nvidia => Err(format!(
-            "{} is an NVIDIA card, but the llama-server here has no CUDA or Vulkan. Download llama.cpp's \"win-cuda\" or \"win-vulkan\" build.",
+            "{} is an NVIDIA card, but the runtime has no CUDA or Vulkan library. Download the matching runtime in Models, or install a compatible llama-server on PATH.",
             gpu.name
         )),
         GpuVendor::Amd => Err(format!(
-            "{} is an AMD card, but the llama-server here has no HIP or Vulkan. Download llama.cpp's \"win-hip\" or \"win-vulkan\" build.",
+            "{} is an AMD card, but the runtime has no HIP or Vulkan library. Download the matching runtime in Models, or install a compatible llama-server on PATH.",
             gpu.name
         )),
         GpuVendor::Intel | GpuVendor::Other => Ok(false),

@@ -22,7 +22,8 @@ pub const MAX_URL: usize = 2048;
 /// Longest error kept with a post, a run or a pause, in characters.
 pub const MAX_ERROR: usize = 500;
 /// The highest score a search can tailor from (a percent).
-pub const MAX_TAILOR_FROM: i64 = 100;
+/// 101 deliberately disables automatic document writing.
+pub const MAX_TAILOR_FROM: i64 = 101;
 
 /// Search terms a search's "what to look for" is read as, at most: each one is a search of
 /// its own on each site.

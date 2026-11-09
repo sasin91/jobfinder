@@ -25,6 +25,80 @@ async fn context() -> Context {
     Context::new(db, TAXONOMY.clone(), KeyVault::with_key_in_memory())
 }
 
+#[tokio::test]
+async fn onboarding_stays_unfinished_after_cv_import_and_finishes_with_deliberate_scan_choices() {
+    let context = context().await;
+    use sqlx::Executor;
+    assert!(setup_steps::is_first_run(&context).await.unwrap());
+    context.db().execute("INSERT INTO profile (id, name, email, phone, title, location, about, created_at, updated_at) VALUES (1, 'Ada', '', '', 'Developer', 'Aarhus', 'Rust', 0, 0)").await.unwrap();
+    assert!(
+        setup_steps::is_first_run(&context).await.unwrap(),
+        "CV import must not complete setup"
+    );
+    account_service::save_key(&context, &openai_form(OPENAI_KEY))
+        .await
+        .unwrap();
+    let step = setup_steps::search_step(&context).await.unwrap();
+    assert_eq!(
+        step.form.tailor_from_score, "101",
+        "document generation starts as a deliberate choice"
+    );
+    let mut form = step.form;
+    form.name = "Developer".into();
+    form.keywords = "Rust".into();
+    jobfinder::job_scan::search_service::save(&context, 0, &form)
+        .await
+        .ok()
+        .unwrap();
+    assert!(setup_steps::finish(&context).await.is_err());
+    setup_steps::skip_scan(&context).await.unwrap();
+    assert!(
+        setup_steps::finish(&context).await.is_err(),
+        "scan frequency must be chosen"
+    );
+    setup_steps::choose_manual(&context).await.unwrap();
+    setup_steps::finish(&context).await.unwrap();
+    assert!(!setup_steps::is_first_run(&context).await.unwrap());
+}
+
+#[tokio::test]
+async fn model_reassessment_preserves_explicit_task_and_provider_choices() {
+    use jobfinder::account::{model_plan, task_model};
+    use jobfinder::llama::{hardware::Inventory, llama_server::LlamaServer};
+    let mut context = context().await;
+    context.llama = Some(LlamaServer::new(
+        &std::env::temp_dir().join("jobfinder-reassessment-test"),
+        Inventory::default(),
+    ));
+    account_service::save_key(&context, &openai_form(OPENAI_KEY))
+        .await
+        .unwrap();
+    task_model::save(context.db(), &[(&task_model::APPLICATION_FORM, "custom-model".into())])
+        .await
+        .unwrap();
+    model_plan::evaluate_again(&context).await.unwrap();
+    let plan = model_plan::overview(&context).await.unwrap();
+    let row = plan.rows.iter().find(|r| r.task.name == "application_form").unwrap();
+    assert_eq!(row.provider, "openai");
+    assert_eq!(row.current, "custom-model");
+    assert!(row.manual);
+    assert!(plan.assessment.is_some());
+    assert!(
+        model_plan::check(&context, "application_form").await.is_err(),
+        "local check must never call a cloud provider"
+    );
+    assert!(
+        model_plan::apply(&context, "application_form").await.is_err(),
+        "local suggestion must never change cloud task routing"
+    );
+    assert_eq!(
+        task_model::saved_for(context.db(), &task_model::APPLICATION_FORM)
+            .await
+            .unwrap(),
+        "custom-model"
+    );
+}
+
 fn openai_form(api_key: &str) -> KeyForm {
     KeyForm {
         provider: " openai ".to_string(),

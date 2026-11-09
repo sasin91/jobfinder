@@ -2,13 +2,13 @@
 //! later) can show the same steps from the same functions: where the database is, which model
 //! the AI runs on, the profile read from the CV, and the job scan's schedule.
 //!
-//! The first run is told from the data itself, not from a flag: a database without a profile and
-//! without saved matches hasn't been set up. Jonas's imported database has both, so it never
-//! counts as a first run.
+//! Completion and deliberate skips are saved per database (progress). Importing a CV does
+//! not finish a new setup; migration 0018 preserves existing populated databases.
 
 use crate::account::account_model::{self, RESUME};
 use crate::account::model_advice::ModelAdvice;
 use crate::context::Context;
+use crate::job_scan::{job_scan_model, scan_service, search_service};
 use crate::matches::free_reader::YearMonth;
 use crate::matches::llm_key;
 pub use crate::profile::YearsOfWork;
@@ -17,12 +17,138 @@ use crate::profile::{self, MAX_YEARS_OF_WORK, profile_fill};
 use crate::scan_schedule::INTERVALS;
 use crate::service_error::{ErrorKind, ServiceError};
 
+pub struct SearchStep {
+    pub id: i64,
+    pub form: search_service::SearchForm,
+    pub scan_summary: Option<String>,
+    pub scan_problem: Option<String>,
+    pub progress: super::progress::Progress,
+    pub profile_text: Option<String>,
+    pub source_status: Vec<String>,
+}
+
+pub async fn search_step(context: &Context) -> Result<SearchStep, ServiceError> {
+    let searches = job_scan_model::searches(context.db()).await?;
+    let selected = searches.iter().find(|s| s.active).or_else(|| searches.first());
+    let search = match selected {
+        Some(s) => job_scan_model::find(context.db(), s.id).await?,
+        None => None,
+    };
+    let search = search.as_ref();
+    let last = job_scan_model::last_run(context.db(), search.map(|s| s.id)).await?;
+    let scan_summary = last.map(|run| {
+        format!(
+            "Last scan: {} posts found, {} new. {}",
+            run.posts_found,
+            run.posts_new,
+            if run.error.is_empty() {
+                "Open Job searches to review matches and any post failures."
+            } else {
+                &run.error
+            }
+        )
+    });
+    let mut form = search
+        .map(search_service::SearchForm::of)
+        .unwrap_or_else(search_service::SearchForm::new_search);
+    if search.is_none() {
+        form.skipped_sites = "linkedin.com\nindeed.com".to_string();
+        form.tailor_from_score = "101".to_string();
+    }
+    Ok(SearchStep {
+        id: search.map_or(0, |s| s.id),
+        scan_summary,
+        scan_problem: scan_service::scan_problem(context).await?,
+        progress: super::progress::read(context.db()).await?,
+        profile_text: profile::text_for_user(context.db()).await?,
+        source_status: crate::job_sites::JobSite::SIGNED_IN
+            .iter()
+            .map(|site| {
+                if form.skipped_sites.lines().any(|domain| domain == site.domain()) {
+                    format!("{}: skipped in this search.", site.domain())
+                } else if let Some(browser) = &context.signed_in {
+                    browser.pause_of(site.domain()).unwrap_or_else(|| {
+                        format!(
+                            "{}: browser available; sign-in is verified when the scan reads it.",
+                            site.domain()
+                        )
+                    })
+                } else {
+                    format!("{}: sign-in browser unavailable here.", site.domain())
+                }
+            })
+            .collect(),
+        form,
+    })
+}
+
+pub async fn choose_manual(context: &Context) -> Result<String, ServiceError> {
+    // Remove an existing schedule too: the selected choice must match actual behavior.
+    context
+        .scan_schedule
+        .remove()
+        .await
+        .map_err(|why| ServiceError::failed("setup/manual", why))?;
+    let mut progress = super::progress::read(context.db()).await?;
+    progress.manual_scan = true;
+    super::progress::save(context.db(), &progress).await?;
+    Ok("Manual scanning selected. Use Scan now whenever you want to check for jobs.".into())
+}
+
+pub async fn skip_scan(context: &Context) -> Result<String, ServiceError> {
+    let mut progress = super::progress::read(context.db()).await?;
+    progress.skipped_scan = true;
+    super::progress::save(context.db(), &progress).await?;
+    Ok("First scan skipped for now. Your search is saved; you can run it from Job searches.".into())
+}
+
+pub async fn visit(context: &Context, step: usize) -> Result<(), ServiceError> {
+    if step >= 6 {
+        return Err(ServiceError::new(ErrorKind::Invalid, "Unknown setup step."));
+    }
+    let mut progress = super::progress::read(context.db()).await?;
+    progress.current_step = step;
+    super::progress::save(context.db(), &progress).await?;
+    Ok(())
+}
+
+pub async fn finish(context: &Context) -> Result<(), ServiceError> {
+    let step = search_step(context).await?;
+    if let Some(problem) = step.scan_problem {
+        return Err(ServiceError::new(ErrorKind::Invalid, problem));
+    }
+    if step.id == 0 || step.form.active != "1" {
+        return Err(ServiceError::new(
+            ErrorKind::Invalid,
+            "Save an active job search before finishing setup.",
+        ));
+    }
+    if step.scan_summary.is_none() && !step.progress.skipped_scan {
+        return Err(ServiceError::new(
+            ErrorKind::Invalid,
+            "Try the first scan, or choose Skip for now.",
+        ));
+    }
+    if context.scan_schedule.interval_hours().await.unwrap_or(None).is_none() && !step.progress.manual_scan {
+        return Err(ServiceError::new(
+            ErrorKind::Invalid,
+            "Choose a scan schedule or select manual scanning.",
+        ));
+    }
+    let mut progress = step.progress;
+    progress.completed = true;
+    super::progress::save(context.db(), &progress).await?;
+    Ok(())
+}
+
 /// The database step: the file the app keeps everything in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DatabaseStep {
     pub path: String,
     /// Made by this start of the app, rather than found.
     pub made_now: bool,
+    pub system: String,
+    pub storage: String,
 }
 
 /// The AI step: the saved keys, and the suggestion while there are none.
@@ -51,16 +177,9 @@ pub struct ScheduleStep {
     pub task_run: String,
 }
 
-/// Whether the app hasn't been set up yet: no profile and no saved matches.
+/// Whether this database's first-run setup has not been explicitly completed.
 pub async fn is_first_run(context: &Context) -> sqlx::Result<bool> {
-    let has_profile = profile_model::filled_from(context.db()).await?.is_some();
-    if has_profile {
-        return Ok(false);
-    }
-    let has_matches = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM matches) AS "has!: bool""#)
-        .fetch_one(context.db())
-        .await?;
-    Ok(!has_matches)
+    Ok(!super::progress::read(context.db()).await?.completed)
 }
 
 /// is_first_run, or false (logged) when the database can't say: the pages that only link back
@@ -98,9 +217,35 @@ pub fn interval_label(hours: u32) -> &'static str {
 }
 
 pub fn database(context: &Context) -> DatabaseStep {
+    let folder = std::path::Path::new(&context.database.path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let storage = fs2::available_space(folder)
+        .map(|bytes| {
+            format!(
+                "{} free where your data is kept. Model downloads show their additional space requirements in Models.",
+                crate::llama::hardware::gigabytes(bytes)
+            )
+        })
+        .unwrap_or_else(|_| {
+            "Available storage could not be checked. Choose a writable folder before downloading models.".into()
+        });
+    let system = format!(
+        "{} / {}. {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        context
+            .llama
+            .as_ref()
+            .map(|s| s.inventory().to_string())
+            .unwrap_or_else(|| "Local hardware setup is unavailable.".into())
+    );
     DatabaseStep {
         path: context.database.path.clone(),
         made_now: context.database.made_now,
+        system,
+        storage,
     }
 }
 

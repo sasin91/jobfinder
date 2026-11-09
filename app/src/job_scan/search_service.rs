@@ -327,7 +327,7 @@ mod tests {
             vec![
                 "Give the search a name.",
                 "Say what to look for.",
-                "The score to tailor from is 0 to 100."
+                "The score to tailor from is 0 to 101."
             ]
         );
         let form = SearchForm {

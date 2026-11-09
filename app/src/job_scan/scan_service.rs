@@ -95,6 +95,8 @@ const SECONDS_PER_HOUR: i64 = 3600;
 /// scanned again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Started {
+    /// A bounded first-run trial: one search, at most three matches, five minutes.
+    Setup,
     /// Scan now, or a search's own Scan now: a search scanned within the hour is skipped.
     ByHand,
     /// The schedule (`jobfinder scan` while the task is registered): a search scanned since the
@@ -107,6 +109,7 @@ impl Started {
     /// until a little before its next scan is due, so two never pile up.
     pub fn time_limit(self) -> Duration {
         match self {
+            Started::Setup => Duration::from_secs(300),
             Started::ByHand => BY_HAND_TIME_LIMIT,
             Started::BySchedule { .. } => Duration::from_secs(self.min_seconds_between_scans().unsigned_abs()),
         }
@@ -115,6 +118,7 @@ impl Started {
     /// A search scanned less than this many seconds ago is skipped.
     pub fn min_seconds_between_scans(self) -> i64 {
         match self {
+            Started::Setup => MIN_SECONDS_BETWEEN_SCANS,
             Started::ByHand => MIN_SECONDS_BETWEEN_SCANS,
             Started::BySchedule { every_hours } => {
                 let interval = i64::from(every_hours) * SECONDS_PER_HOUR;
@@ -345,7 +349,12 @@ pub async fn scan(context: Arc<Context>, started: Started) -> Result<ScanReport,
         .run(
             WorkKind::Scan,
             "Every active search",
-            scan_holding_lock(Arc::clone(&context), started),
+            async {
+                if started == Started::Setup {
+                    running_work::timeout_unpaused(started.time_limit(), scan_holding_lock(Arc::clone(&context), started)).await
+                        .map_err(|_| ServiceError::failed("setup/scan", "The five-minute trial ended. Saved results are kept. Review Job searches for progress and retry failed posts."))?
+                } else { scan_holding_lock(Arc::clone(&context), started).await }
+            },
         )
         .await
     {
@@ -376,7 +385,7 @@ async fn scan_holding_lock(context: Arc<Context>, started: Started) -> Result<Sc
 /// stopped before it was done. What the check couldn't do is one of the scan's problems.
 async fn scan_then_check_open(context: &Arc<Context>, started: Started) -> Result<ScanReport, ServiceError> {
     let mut report = Box::pin(scan_searches(context, started)).await?;
-    if report.stopped.is_none() {
+    if report.stopped.is_none() && started != Started::Setup {
         match Box::pin(still_open::check(context, still_open::PAUSE_BETWEEN_READS)).await {
             Ok(checked) => report.still_open = Some(checked),
             Err(e) => report.problems.push(format!(
@@ -413,11 +422,19 @@ async fn scan_searches(context: &Arc<Context>, started: Started) -> Result<ScanR
     let mut report = ScanReport::default();
     // What an earlier scan found but didn't get to match, before it stopped.
     let stopped_before = chrono::Utc::now().timestamp() - RUN_GIVE_UP_SECONDS;
-    let unfinished = model::unfinished_posts(db, stopped_before).await?;
+    let unfinished = if started == Started::Setup {
+        Vec::new()
+    } else {
+        model::unfinished_posts(db, stopped_before).await?
+    };
     if !matching.match_posts(&context, unfinished, &mut report).await {
         return Ok(report);
     }
-    for search_id in model::scannable(db).await? {
+    let searches = model::scannable(db).await?;
+    for search_id in searches
+        .into_iter()
+        .take(if started == Started::Setup { 1 } else { usize::MAX })
+    {
         running_work::until_resumed().await;
         if running_work::stop_asked() {
             report.stopped = Some(STOPPED_SCAN.to_string());
@@ -445,7 +462,12 @@ async fn scan_searches(context: &Arc<Context>, started: Started) -> Result<ScanR
         if let Some(problem) = found.problem {
             report.problems.push(format!("{}: {problem}", search.name));
         }
-        if !matching.match_posts(&context, found.new_posts, &mut report).await {
+        let posts = if started == Started::Setup {
+            found.new_posts.into_iter().take(3).collect()
+        } else {
+            found.new_posts
+        };
+        if !matching.match_posts(&context, posts, &mut report).await {
             break;
         }
     }

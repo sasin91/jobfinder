@@ -632,6 +632,10 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
             return Task::done(Message::Show(Screen::LanguageModels))
                 .chain(Task::done(Message::LanguageModels(language_models::Msg::Tell(message))));
         }
+        Message::LocalModel(local_model::Msg::ShowLanguageModels) => {
+            return Task::done(Message::Show(Screen::LanguageModels));
+        }
+        Message::LocalModel(local_model::Msg::BackToSetup) => return Task::done(Message::Show(Screen::Setup)),
         Message::LocalModel(msg) => {
             let runner = shell.runner();
             return local_model::update(&mut shell.local_model, msg, &runner).map(Message::LocalModel);
@@ -667,6 +671,8 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
         }
         Message::Setup(setup_screen::Msg::ShowLocalModel) => return Task::done(Message::Show(Screen::LocalModel)),
         Message::Setup(setup_screen::Msg::Finish) => return Task::done(Message::Show(Screen::Match)),
+        Message::Setup(setup_screen::Msg::Later) => return Task::done(Message::Show(Screen::Match)),
+        Message::Setup(setup_screen::Msg::ShowSearches) => return Task::done(Message::Show(Screen::JobSearches)),
         Message::Setup(msg) => {
             let runner = shell.runner();
             return setup_screen::update(&mut shell.setup, msg, &runner).map(Message::Setup);
@@ -878,10 +884,11 @@ fn sidebar(shell: &Shell) -> Element<'static, Message> {
         container(text(TITLE).font(style::title_font()).size(style::SECTION_SIZE)).padding([8.0, 12.0]),
         nav_item("Match", Screen::Match, current),
         nav_item("Language models", Screen::LanguageModels, current),
-        nav_item("Local model", Screen::LocalModel, current),
+        nav_item("Models", Screen::LocalModel, current),
         nav_item("Taxonomy", Screen::Taxonomy, current),
         nav_item("Job searches", Screen::JobSearches, current),
         nav_item("Task manager", Screen::TaskManager, current),
+        nav_item("Setup", Screen::Setup, current),
         nav_item("Settings", Screen::Settings, current),
         space().height(Fill),
         game_mode_button(shell.context.game_mode.manual(), shell.detected_game.is_some()),
@@ -971,7 +978,7 @@ fn nav_item(label: &'static str, screen: Screen, current: Screen) -> Element<'st
 
 /// The screens without a sidebar entry, opened from Settings, which stays marked for them.
 fn opened_from_settings(screen: Screen) -> bool {
-    matches!(screen, Screen::Setup | Screen::JoblogExtension | Screen::Devices)
+    matches!(screen, Screen::JoblogExtension | Screen::Devices)
 }
 
 /// Why the device server isn't listening, when it couldn't start.

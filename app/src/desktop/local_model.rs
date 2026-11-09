@@ -12,6 +12,7 @@ use super::style;
 use super::widgets::{self, CARD_PADDING, ROW_PADDING};
 use super::{GAP, Runner};
 use crate::account::llama_setup_service::{self, CatalogRow, LlamaSetupView};
+use crate::account::model_plan;
 use crate::dashboard::Health;
 
 /// How often the screen reads a running download's progress.
@@ -29,12 +30,19 @@ pub struct State {
     said: Option<(Health, String)>,
     /// A reload is on its way, so a download's progress isn't asked for twice.
     polling: bool,
+    busy: bool,
 }
 
 #[derive(Clone)]
 pub enum Msg {
     Load,
     Loaded(Result<Arc<LlamaSetupView>, String>),
+    Evaluate,
+    Prepare,
+    CheckTask(&'static str),
+    ApplyTask(&'static str),
+    ShowLanguageModels,
+    BackToSetup,
     DownloadServer,
     DownloadModel(&'static str),
     UseModel(&'static str),
@@ -63,7 +71,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             );
         }
         Msg::Loaded(view) => {
-            let running = view.as_ref().is_ok_and(|view| view.busy);
+            let running = state.busy || view.as_ref().is_ok_and(|view| view.busy);
             state.view = Some(view);
             if running && !state.polling {
                 state.polling = true;
@@ -73,6 +81,60 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         Msg::Poll => {
             state.polling = false;
             return Task::done(Msg::Load);
+        }
+        Msg::Evaluate => {
+            state.busy = true;
+            state.said = Some((Health::Neutral, "Refreshing hardware and comparing task models…".into()));
+            return runner.run(
+                |context| async move { model_plan::evaluate_again(&context).await },
+                said,
+            );
+        }
+        Msg::Prepare => {
+            state.busy = true;
+            state.said = Some((
+                Health::Neutral,
+                "Preparing the local task plan… Progress and cancellation are available in Task manager.".into(),
+            ));
+            return Task::batch([
+                runner.run(
+                    |context| async move {
+                        let work = Arc::clone(&context.running);
+                        work.run(
+                            crate::task_manager::running_work::WorkKind::Download,
+                            "Prepare task models",
+                            model_plan::prepare(context),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(crate::service_error::ServiceError::failed(
+                                "models",
+                                "Preparation stopped. Downloaded files are kept; try again to resume.",
+                            ))
+                        })
+                    },
+                    said,
+                ),
+                Task::done(Msg::Load),
+            ]);
+        }
+        Msg::CheckTask(task) => {
+            state.busy = true;
+            state.said = Some((
+                Health::Neutral,
+                "Loading and checking the assigned local model (up to two minutes)…".into(),
+            ));
+            return runner.run(
+                move |context| async move { model_plan::check(&context, task).await },
+                said,
+            );
+        }
+        Msg::ApplyTask(task) => {
+            state.busy = true;
+            return runner.run(
+                move |context| async move { model_plan::apply(&context, task).await },
+                said,
+            );
         }
         Msg::DownloadServer => {
             return runner.run(
@@ -126,8 +188,9 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         }
         Msg::NoFolder => state.said = None,
         // The shell goes on.
-        Msg::ModelInUse { .. } => {}
+        Msg::ModelInUse { .. } | Msg::ShowLanguageModels | Msg::BackToSetup => {}
         Msg::Said(said) => {
+            state.busy = false;
             state.said = Some(match said {
                 Ok(said) => (Health::Ready, said),
                 Err(why) => (Health::Attention, why),
@@ -145,9 +208,9 @@ fn said(answer: Result<Result<String, crate::service_error::ServiceError>, Strin
 
 pub fn view(state: &State) -> Element<'_, Msg> {
     let title = widgets::page_title(
-        "Local model",
+        "Models",
         widgets::note(
-            "The app runs a model itself with llama.cpp: no API key, nothing paid per use, and your CV stays here.",
+            "Which model handles each task, why it was chosen, and alternatives for this computer. Local models keep your CV here; cloud providers receive the inputs for their assigned tasks.",
         ),
     );
     let mut screen = Column::new().spacing(GAP * 1.5).push(title);
@@ -163,7 +226,18 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         }
         Some(Ok(view)) => view,
     };
-    screen = screen.push(widgets::section("This computer", computer(view)));
+    let busy = state.busy || view.busy;
+    if let Some(plan) = &view.plan {
+        screen = screen.push(plan_card(plan, busy));
+    }
+    if view.setup_unfinished {
+        screen = screen.push(
+            button(text("Continue setup").size(style::BODY_SIZE))
+                .style(style::standard_button)
+                .on_press_maybe((!busy).then_some(Msg::BackToSetup)),
+        );
+    }
+    screen = screen.push(widgets::section("This computer", computer(view, busy)));
     if let Some(download) = &view.download {
         screen = screen.push(widgets::section("Download", download_card(download)));
     }
@@ -173,7 +247,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             widgets::rows(
                 view.downloaded
                     .iter()
-                    .map(|model| model_row(model, ModelAction::Use, view.busy)),
+                    .map(|model| model_row(model, ModelAction::Use, busy)),
             ),
         ));
     }
@@ -183,13 +257,13 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             widgets::rows(
                 view.to_download
                     .iter()
-                    .map(|model| model_row(model, ModelAction::Download, view.busy)),
+                    .map(|model| model_row(model, ModelAction::Download, busy)),
             ),
         ));
     }
     let move_models = button(text("Move to another folder…").size(style::BODY_SIZE))
         .style(style::standard_button)
-        .on_press_maybe((!view.busy).then_some(Msg::MoveModels));
+        .on_press_maybe((!busy).then_some(Msg::MoveModels));
     let folder = row![
         column![
             text(view.models_folder.as_str()).size(style::BODY_SIZE),
@@ -205,8 +279,100 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     screen.push(widgets::section("Models folder", folder.into())).into()
 }
 
+fn plan_card(plan: &model_plan::Overview, busy: bool) -> Element<'_, Msg> {
+    let evaluated = plan
+        .assessment
+        .as_ref()
+        .and_then(|a| chrono::DateTime::from_timestamp(a.at, 0))
+        .map(|at| format!("Last evaluated: {}", at.format("%e %B %Y, %H:%M UTC")))
+        .unwrap_or_else(|| "Not evaluated on this computer yet.".to_string());
+    let mut body = Column::new().spacing(12)
+        .push(widgets::caption(evaluated))
+        .push(widgets::note("Changed your hardware or want to compare models? Evaluate again. This refreshes hardware and fit estimates; it keeps your choices and downloads nothing."))
+        .push(row![
+            button(text("Evaluate again").size(style::BODY_SIZE)).style(style::primary_button).on_press_maybe((!busy).then_some(Msg::Evaluate)),
+            button(text("Providers and advanced choices").size(style::BODY_SIZE)).style(style::standard_button).on_press(Msg::ShowLanguageModels),
+        ].spacing(8));
+    body = body.push(widgets::caption(format!("Missing catalog models in the local plan: {} total, shared models counted once. Runtime and temporary extraction space are additional. Existing providers and manual task choices are preserved.", crate::llama::hardware::gigabytes(plan.download_bytes))))
+        .push(button(text("Download and prepare local plan").size(style::BODY_SIZE)).style(style::primary_button).on_press_maybe((!busy).then_some(Msg::Prepare)));
+    for task in &plan.rows {
+        let current = if task.provider.is_empty() {
+            "Not configured".to_string()
+        } else {
+            format!(
+                "{} / {}{}",
+                crate::account::account_model::provider_label(&task.provider),
+                task.current,
+                if task.manual {
+                    " (chosen explicitly)"
+                } else {
+                    " (default)"
+                }
+            )
+        };
+        let mut card = column![
+            text(task.task.label).font(style::semibold()).size(style::BODY_SIZE),
+            text(current).size(style::BODY_SIZE),
+            widgets::caption(task.why),
+        ]
+        .spacing(6);
+        if let Some(file) = task.suggested {
+            let size = crate::llama::catalog::find(file)
+                .map(|m| crate::llama::hardware::gigabytes(m.bytes))
+                .unwrap_or_default();
+            card = card.push(widgets::caption(format!(
+                "Local alternative: {file} · {size} · Estimated: {}",
+                task.fit
+            )));
+        }
+        if task.provider == crate::llm::LLAMA_CPP {
+            card = card.push(widgets::caption(if task.downloaded {
+                "Assigned file is downloaded."
+            } else {
+                "Assigned file needs downloading. Prepare the plan above."
+            }));
+            if let Some(check) = &task.check {
+                card = card.push(widgets::caption(format!(
+                    "{} · {:.1} s including loading · {}",
+                    if check.passed {
+                        "Local fixture passed"
+                    } else {
+                        "Check needs attention"
+                    },
+                    check.milliseconds as f64 / 1000.0,
+                    check.detail
+                )));
+            } else {
+                card = card.push(widgets::caption(
+                    "Not checked in the current assessment. Fit estimates do not establish speed or quality.",
+                ));
+            }
+            let mut actions = row![
+                button(text("Run local check").size(style::BODY_SIZE))
+                    .style(style::standard_button)
+                    .on_press_maybe((!busy && task.downloaded).then_some(Msg::CheckTask(task.task.name)))
+            ]
+            .spacing(8);
+            if task.suggested.is_some_and(|f| f != task.current) {
+                actions = actions.push(
+                    button(text("Use local alternative").size(style::BODY_SIZE))
+                        .style(style::standard_button)
+                        .on_press_maybe((!busy).then_some(Msg::ApplyTask(task.task.name))),
+                );
+            }
+            card = card.push(actions);
+        }
+        body = body.push(widgets::card(container(card).padding(CARD_PADDING).width(Fill).into()));
+    }
+
+    widgets::section(
+        "Your task models",
+        container(body).padding(CARD_PADDING).width(Fill).into(),
+    )
+}
+
 /// The computer the models are weighed against, and llama-server.
-fn computer(view: &LlamaSetupView) -> Element<'_, Msg> {
+fn computer(view: &LlamaSetupView, busy: bool) -> Element<'_, Msg> {
     let mut rows: Vec<Element<'_, Msg>> = vec![
         row![
             style::mark(Health::Neutral),
@@ -249,7 +415,7 @@ fn computer(view: &LlamaSetupView) -> Element<'_, Msg> {
             .width(Fill),
             button(text("Download llama.cpp").size(style::BODY_SIZE))
                 .style(style::primary_button)
-                .on_press_maybe((!view.busy).then_some(Msg::DownloadServer)),
+                .on_press_maybe((!busy).then_some(Msg::DownloadServer)),
         ]
         .spacing(14)
         .align_y(Center)
@@ -267,7 +433,7 @@ fn computer(view: &LlamaSetupView) -> Element<'_, Msg> {
                     .width(Fill),
                 button(text("Download llama.cpp again").size(style::BODY_SIZE))
                     .style(style::standard_button)
-                    .on_press_maybe((!view.busy).then_some(Msg::DownloadServer)),
+                    .on_press_maybe((!busy).then_some(Msg::DownloadServer)),
             ]
             .spacing(14)
             .align_y(Center)
@@ -329,7 +495,7 @@ fn model_row(model: &CatalogRow, action: ModelAction, busy: bool) -> Element<'_,
         );
     }
     let (label, msg, enabled) = match action {
-        ModelAction::Use => ("Use this model", Msg::UseModel(model.file), true),
+        ModelAction::Use => ("Use as base model", Msg::UseModel(model.file), !busy),
         ModelAction::Download => ("Download", Msg::DownloadModel(model.file), !busy && !model.too_big),
     };
     let style = if model.recommended {

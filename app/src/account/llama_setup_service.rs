@@ -64,6 +64,7 @@ pub struct DownloadView {
 
 /// The wizard's data.
 pub struct LlamaSetupView {
+    pub plan: Option<super::model_plan::Overview>,
     pub computer: String,
     pub models_folder: String,
     pub server_found: bool,
@@ -105,6 +106,7 @@ fn server_of(context: &Context) -> Result<&LlamaServer, ServiceError> {
 pub async fn llama_setup_view(context: &Context) -> Result<LlamaSetupView, ServiceError> {
     let server = server_of(context)?;
     let mut view = view_of(server);
+    view.plan = Some(super::model_plan::overview(context).await?);
     view.setup_unfinished = setup::first_run_or_logged(context).await;
     Ok(view)
 }
@@ -113,7 +115,7 @@ pub async fn llama_setup_view(context: &Context) -> Result<LlamaSetupView, Servi
 pub fn download_server(context: &Arc<Context>) -> Result<(), ServiceError> {
     start_download(context, SERVER_DOWNLOAD, |context: Arc<Context>| async move {
         let server = server_of(&context).map_err(|e| e.message)?;
-        download::download_server(server.folder(), server.inventory(), &server.downloads).await
+        download::download_server(server.folder(), &server.inventory(), &server.downloads).await
     })
 }
 
@@ -246,6 +248,7 @@ pub fn view_of(server: &LlamaServer) -> LlamaSetupView {
         downloaded,
     } = model_lists(rows);
     LlamaSetupView {
+        plan: None,
         computer: overview.inventory.to_string(),
         models_folder: models_folder.display().to_string(),
         server_found: overview.server.is_some(),
@@ -254,7 +257,7 @@ pub fn view_of(server: &LlamaServer) -> LlamaSetupView {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
-        build_label: Build::for_computer(inventory).label(),
+        build_label: Build::for_computer(&inventory).label(),
         card_problem: card_problem(server, overview.card_problem, good_model_fits_card),
         download,
         busy,
@@ -280,7 +283,7 @@ fn catalog_rows(server: &LlamaServer, card_usable: bool) -> Vec<CatalogRow> {
         .filter(|(model, _)| model.fits_every_task)
         .map(|(_, file)| file.clone())
         .collect();
-    let recommended = model_choice::choose(&for_every_task, "", inventory, card_usable)
+    let recommended = model_choice::choose(&for_every_task, "", &inventory, card_usable)
         .map(|(model, _)| model.name.clone())
         .ok();
     let downloaded: Vec<String> = server.models().into_iter().map(|model| model.name).collect();
@@ -288,7 +291,7 @@ fn catalog_rows(server: &LlamaServer, card_usable: bool) -> Vec<CatalogRow> {
         .iter()
         .zip(&as_files)
         .map(|(model, file): (&CatalogModel, _)| {
-            let fit = model_choice::fit(file, inventory, card_usable);
+            let fit = model_choice::fit(file, &inventory, card_usable);
             CatalogRow {
                 file: model.file,
                 label: model.label,
@@ -360,7 +363,8 @@ fn card_problem(server: &LlamaServer, overview_problem: Option<String>, good_mod
     if overview_problem.is_some() {
         return overview_problem;
     }
-    let gpu = server.inventory().gpu.as_ref()?;
+    let inventory = server.inventory();
+    let gpu = inventory.gpu.as_ref()?;
     let driven = server.server_path().is_none() || server.card_usable().unwrap_or(false);
     if driven || !good_model_fits_card {
         return None;

@@ -6,11 +6,13 @@
 //!    else an OpenAI or Claude key (model_advice). The steps themselves are the Local model and
 //!    Language models screens, which come back here while the setup isn't finished.
 //! 3. The CV, read into the profile (profile_fill), which needs the model.
-//! 4. How often the job scan runs by itself: a Task Scheduler task (scan_schedule).
-//! 5. The dashboard: the Match screen.
+//! 4. Jobs and individual sources, using the shared search service.
+//! 5. A bounded first scan, or an explicit skip.
+//! 6. Manual scanning or an automatic schedule, then explicit completion.
 //!
 //! The steps' state and their work are in setup_steps.
 
+pub mod progress;
 pub mod setup_steps;
 
 pub use self::setup_steps::{first_run_or_logged, is_first_run};

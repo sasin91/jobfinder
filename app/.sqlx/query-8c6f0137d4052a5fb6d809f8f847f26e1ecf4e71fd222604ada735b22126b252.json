@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value AS \"value!: String\" FROM app_state WHERE name = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "value!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "app_state",
+            "name": "value"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8c6f0137d4052a5fb6d809f8f847f26e1ecf4e71fd222604ada735b22126b252"
+}
