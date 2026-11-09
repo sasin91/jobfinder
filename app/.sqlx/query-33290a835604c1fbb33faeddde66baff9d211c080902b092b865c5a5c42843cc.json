@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM model_checks WHERE assessment_id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "33290a835604c1fbb33faeddde66baff9d211c080902b092b865c5a5c42843cc"
+}

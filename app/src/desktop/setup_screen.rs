@@ -14,6 +14,10 @@ use super::style;
 use super::widgets::{self, CARD_PADDING};
 use super::{GAP, Runner};
 use crate::dashboard::Health;
+use crate::job_scan::{
+    scan_lock, scan_service,
+    search_service::{self, SaveError, SearchForm},
+};
 use crate::scan_schedule::{DEFAULT_INTERVAL_HOURS, INTERVALS};
 use crate::setup::setup_steps::{self, AiStep, CvStep, DatabaseStep, ScheduleStep};
 
@@ -30,6 +34,7 @@ pub struct Steps {
     ai: AiStep,
     cv: CvStep,
     schedule: ScheduleStep,
+    search: setup_steps::SearchStep,
 }
 
 /// An interval the job scan can run at, for the list.
@@ -78,11 +83,37 @@ pub struct State {
     /// Work is running (reading the CV, the scheduler), so the buttons wait.
     busy: bool,
     said: Option<(Health, String)>,
+    search_form: SearchForm,
+    search_dirty: bool,
+    search_errors: Vec<String>,
+    scanning: bool,
+    stage: usize,
+    stage_loaded: bool,
 }
 
 #[derive(Clone)]
 pub enum Msg {
     Load,
+    Stage(usize),
+    StageRecorded(Result<(), String>),
+    SearchName(String),
+    SearchKeywords(String),
+    SearchLocation(String),
+    SearchRemote(bool),
+    SearchSite(&'static str, bool),
+    SearchThreshold(String),
+    SaveSearch,
+    SearchSaved(Result<String, Vec<String>>),
+    SignIn,
+    FirstScan,
+    ScanDone(Result<String, String>),
+    StopScan,
+    SkipScan,
+    Manual,
+    Complete,
+    Completed(Result<(), String>),
+    Later,
+    ShowSearches,
     Loaded(Result<Arc<Steps>, String>),
     ChooseCv,
     CvPicked(Result<Picked, String>),
@@ -123,6 +154,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                         ai,
                         cv,
                         schedule: setup_steps::schedule(&context).await,
+                        search: setup_steps::search_step(&context).await.map_err(|e| e.message)?,
                     }))
                 },
                 |read| Msg::Loaded(read.and_then(|steps| steps)),
@@ -130,9 +162,16 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         }
         Msg::Loaded(steps) => {
             if let Ok(steps) = &steps {
+                if !state.stage_loaded {
+                    state.stage = steps.search.progress.current_step.min(5);
+                    state.stage_loaded = true;
+                }
                 state.interval = interval_of(steps.schedule.interval_hours);
                 state.replace = false;
                 state.years_text = steps.cv.years.as_ref().map(setup_steps::years_box).unwrap_or_default();
+                if !state.search_dirty {
+                    state.search_form = steps.search.form.clone();
+                }
             }
             if let Err(why) = &steps {
                 crate::log_line!("setup: the steps couldn't be read: {why}");
@@ -146,6 +185,157 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                 |context| async move { pick_file(context).await },
                 |picked| Msg::CvPicked(picked.and_then(|picked| picked.map_err(|e| e.message))),
             );
+        }
+        Msg::SearchName(value) => {
+            state.search_form.name = value;
+            state.search_dirty = true;
+        }
+        Msg::Stage(stage) => {
+            state.stage = stage.min(5);
+            return runner.run(
+                move |context| async move { setup_steps::visit(&context, stage).await },
+                |r| Msg::StageRecorded(r.and_then(|s| s.map_err(|e| e.message))),
+            );
+        }
+        Msg::StageRecorded(Err(why)) => state.said = Some((Health::Attention, why)),
+        Msg::StageRecorded(Ok(())) => {}
+        Msg::SearchKeywords(value) => {
+            state.search_form.keywords = value;
+            state.search_dirty = true;
+        }
+        Msg::SearchLocation(value) => {
+            state.search_form.location = value;
+            state.search_dirty = true;
+        }
+        Msg::SearchThreshold(value) => {
+            state.search_form.tailor_from_score = value;
+            state.search_dirty = true;
+        }
+        Msg::SearchRemote(value) => {
+            state.search_form.remote_ok = if value { "1" } else { "" }.into();
+            state.search_dirty = true;
+        }
+        Msg::SearchSite(domain, enabled) => {
+            let mut skipped = state
+                .search_form
+                .skipped_sites
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            skipped.retain(|s| s != domain);
+            if !enabled {
+                skipped.push(domain.to_string());
+            }
+            state.search_form.skipped_sites = skipped.join("\n");
+            state.search_dirty = true;
+        }
+        Msg::SaveSearch => {
+            let id = state
+                .steps
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .map_or(0, |s| s.search.id);
+            let mut form = state.search_form.clone();
+            form.active = "1".into();
+            state.busy = true;
+            return runner.run(
+                move |context| async move {
+                    search_service::save(&context, id, &form)
+                        .await
+                        .map(|(_, said)| said.to_string())
+                        .map_err(|e| match e {
+                            SaveError::Invalid(why) => why,
+                            SaveError::Failed(e) => vec![e.message],
+                        })
+                },
+                |answer| Msg::SearchSaved(answer.unwrap_or_else(|e| Err(vec![e]))),
+            );
+        }
+        Msg::SearchSaved(result) => {
+            state.busy = false;
+            match result {
+                Ok(said) => {
+                    state.search_dirty = false;
+                    state.search_errors.clear();
+                    state.said = Some((Health::Ready, said));
+                    return Task::done(Msg::Load);
+                }
+                Err(errors) => state.search_errors = errors,
+            }
+        }
+        Msg::SignIn => {
+            return runner.run(
+                |context| async move { search_service::open_sign_in(&context).map(str::to_string) },
+                |r| Msg::Scheduled(r.and_then(|s| s.map_err(|e| e.message))),
+            );
+        }
+        Msg::FirstScan => {
+            state.busy = true;
+            state.scanning = true;
+            state.said = Some((Health::Neutral, "Trying one search, matching up to three posts, for up to five minutes. Configured cloud tasks may incur provider charges. Task manager shows each stage.".into()));
+            return runner.run(
+                |context| async move {
+                    scan_service::scan(context, scan_service::Started::Setup)
+                        .await
+                        .map(|report| {
+                            let mut text = report.summary();
+                            if report.posts_found == 0 && report.problems.is_empty() {
+                                text.push_str(" No posts found: try broader keywords or another location.");
+                            }
+                            if report.matched > 0 {
+                                text.push_str(" Open the dashboard to review your matches and their reasons.");
+                            }
+                            text
+                        })
+                },
+                |r| Msg::ScanDone(r.and_then(|s| s.map_err(|e| e.message))),
+            );
+        }
+        Msg::ScanDone(result) => {
+            state.busy = false;
+            state.scanning = false;
+            state.said = Some(match result {
+                Ok(s) => (Health::Ready, s),
+                Err(e) => (Health::Attention, e),
+            });
+            return Task::done(Msg::Load);
+        }
+        Msg::StopScan => {
+            return runner.run(
+                |context| async move {
+                    scan_lock::ask_to_stop(&context)
+                        .map(|_| "Stopping the trial scan…".to_string())
+                        .map_err(|e| e.to_string())
+                },
+                |r| Msg::Tell(r.and_then(|s| s).unwrap_or_else(|e| e)),
+            );
+        }
+        Msg::SkipScan => {
+            return runner.run(
+                |context| async move { setup_steps::skip_scan(&context).await },
+                |r| Msg::Scheduled(r.and_then(|s| s.map_err(|e| e.message))),
+            );
+        }
+        Msg::Manual => {
+            return runner.run(
+                |context| async move { setup_steps::choose_manual(&context).await },
+                |r| Msg::Scheduled(r.and_then(|s| s.map_err(|e| e.message))),
+            );
+        }
+        Msg::Complete => {
+            state.busy = true;
+            return runner.run(
+                |context| async move { setup_steps::finish(&context).await },
+                |r| Msg::Completed(r.and_then(|s| s.map_err(|e| e.message))),
+            );
+        }
+        Msg::Completed(Ok(())) => {
+            state.busy = false;
+            return Task::done(Msg::Finish);
+        }
+        Msg::Completed(Err(e)) => {
+            state.busy = false;
+            state.said = Some((Health::Attention, e));
         }
         Msg::CvPicked(picked) => {
             state.busy = false;
@@ -230,7 +420,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         }
         // The shell changes screens.
         Msg::Tell(said) => state.said = Some((Health::Ready, said)),
-        Msg::ShowLanguageModels | Msg::ShowLocalModel | Msg::Finish => {}
+        Msg::ShowLanguageModels | Msg::ShowLocalModel | Msg::Finish | Msg::Later | Msg::ShowSearches => {}
     }
     Task::none()
 }
@@ -239,7 +429,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     let title = row![
         widgets::page_title(
             "Set up JobFinder",
-            widgets::note("Four steps, then the dashboard. Everything stays on this computer."),
+            widgets::note("Set up your models, review your CV, choose jobs and sites, then try a first scan. You can leave and resume later. Cloud tasks send their inputs to the provider you choose."),
         ),
         drawings::drawing(&drawings::HERO),
     ]
@@ -258,26 +448,159 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         }
         Some(Ok(steps)) => steps,
     };
-    screen
-        .push(step("1. Your data", true, database_step(&steps.database)))
-        .push(step("2. An AI model", !steps.ai.saved.is_empty(), ai_step(&steps.ai)))
-        .push(step("3. Your CV", steps.cv.filled.is_some(), cv_step(&steps.cv, state)))
-        .push(step(
-            "4. Checking for new jobs",
-            steps.schedule.interval_hours.is_some(),
+    let labels = ["Welcome", "Models", "Your CV", "Jobs & sites", "First scan", "Schedule"];
+    let done = [
+        true,
+        !steps.ai.saved.is_empty(),
+        steps.cv.filled.is_some(),
+        steps.search.id > 0 && !state.search_dirty,
+        steps.search.scan_summary.is_some() || steps.search.progress.skipped_scan,
+        steps.schedule.interval_hours.is_some() || steps.search.progress.manual_scan,
+    ];
+    let mut stages = row![].spacing(6);
+    for (index, label) in labels.iter().enumerate() {
+        stages = stages.push(
+            button(
+                text(format!(
+                    "{}. {label}{}",
+                    index + 1,
+                    if done[index] && index > 0 { " ✓" } else { "" }
+                ))
+                .size(style::CAPTION_SIZE),
+            )
+            .padding(8)
+            .style(if index == state.stage {
+                style::primary_button
+            } else {
+                style::standard_button
+            })
+            .on_press_maybe((!state.busy).then_some(Msg::Stage(index))),
+        );
+    }
+    let content = match state.stage {
+        0 => step("Welcome — your data and this computer", true, database_step(&steps.database)),
+        1 => step("Choose and prepare your models", done[1], ai_step(&steps.ai)),
+        2 => step("Import and review your CV", done[2], cv_step(&steps.cv, state)),
+        3 => step("Define your jobs and choose sites", done[3], search_step(&steps.search, state)),
+        4 => step("Try your first scan", done[4], first_scan(&steps.search, state)),
+        _ => step("Choose when to check for jobs", done[5], column![
             schedule_step(&steps.schedule, state),
-        ))
-        .push(
-            row![
-                space_fill(),
-                button(text("Go to the dashboard").size(style::BODY_SIZE))
-                    .padding([8.0, 16.0])
-                    .style(style::primary_button)
-                    .on_press(Msg::Finish),
-            ]
-            .align_y(Center),
-        )
-        .into()
+            button(text(if steps.search.progress.manual_scan && steps.schedule.interval_hours.is_none() { "Manual scanning selected" } else { "I'll scan manually" }).size(style::BODY_SIZE))
+                .style(style::standard_button).on_press_maybe((!state.busy).then_some(Msg::Manual)),
+            widgets::caption("Finish saves this setup choice. If anything is missing, you'll see what needs attention. You can revisit Setup from Settings at any time."),
+        ].spacing(8).into()),
+    };
+    let mut navigation = row![
+        button(text("Continue later").size(style::BODY_SIZE))
+            .style(style::standard_button)
+            .on_press_maybe((!state.busy).then_some(Msg::Later)),
+        space_fill()
+    ]
+    .spacing(8)
+    .align_y(Center);
+    if state.stage > 0 {
+        navigation = navigation.push(
+            button(text("Back").size(style::BODY_SIZE))
+                .style(style::standard_button)
+                .on_press_maybe((!state.busy).then_some(Msg::Stage(state.stage - 1))),
+        );
+    }
+    if state.stage < 5 {
+        navigation = navigation.push(
+            button(text("Continue").size(style::BODY_SIZE))
+                .padding([8.0, 16.0])
+                .style(style::primary_button)
+                .on_press_maybe((!state.busy && !state.search_dirty).then_some(Msg::Stage(state.stage + 1))),
+        );
+    } else {
+        navigation = navigation.push(
+            button(text("Finish setup").size(style::BODY_SIZE))
+                .padding([8.0, 16.0])
+                .style(style::primary_button)
+                .on_press_maybe((!state.busy && !state.search_dirty).then_some(Msg::Complete)),
+        );
+    }
+    screen.push(stages).push(content).push(navigation).into()
+}
+
+fn search_step<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Element<'a, Msg> {
+    let form = &state.search_form;
+    let mut body = column![
+        widgets::note("Name your search and describe the jobs you want. New posts are matched against the profile reviewed above."),
+        text_input("Search name, e.g. Backend roles", &form.name).on_input(Msg::SearchName).padding(8).style(style::text_field),
+        text_input("Keywords, e.g. Rust developer", &form.keywords).on_input(Msg::SearchKeywords).padding(8).style(style::text_field),
+        text_input("Location, e.g. Aarhus", &form.location).on_input(Msg::SearchLocation).padding(8).style(style::text_field),
+        checkbox(form.remote_ok == "1").label("Include remote jobs").on_toggle(Msg::SearchRemote).style(style::check_box),
+        widgets::caption("Select sources. Jobnet and Jobindex need no account. LinkedIn and Indeed use JobFinder's own browser and may require you to sign in or resolve a site challenge."),
+    ].spacing(10);
+    for (domain, label) in [
+        ("jobnet.dk", "Jobnet — public search"),
+        ("jobindex.dk", "Jobindex — public search"),
+        ("linkedin.com", "LinkedIn — sign-in required"),
+        ("indeed.com", "Indeed — sign-in may be required"),
+    ] {
+        body = body.push(
+            checkbox(!form.skipped_sites.lines().any(|s| s == domain))
+                .label(label)
+                .on_toggle(move |on| Msg::SearchSite(domain, on))
+                .style(style::check_box),
+        );
+    }
+    body = body.push(button(text("Sign in to job sites").size(style::BODY_SIZE)).style(style::standard_button).on_press_maybe((!state.busy).then_some(Msg::SignIn)))
+        .push(widgets::caption("LinkedIn and Indeed restrict automated access; the scan pauses when they request sign-in or a person check. If OpenAI is selected for job evaluation, the scan also uses its web search."))
+        .push(widgets::caption("Automatically write applications and tailored résumés from this match score (0–100). Use 101 to leave document writing manual."))
+        .push(text_input("Document-writing threshold", &form.tailor_from_score).on_input(Msg::SearchThreshold).padding(8).style(style::text_field))
+        .push(button(text(if step.id == 0 { "Save my first search" } else { "Save search and sources" }).size(style::BODY_SIZE)).style(style::primary_button).on_press_maybe((!state.busy).then_some(Msg::SaveSearch)));
+    if let Some(profile) = &step.profile_text {
+        body = body.push(widgets::section_title("Profile used for matching"))
+            .push(widgets::caption(profile.clone()))
+            .push(widgets::caption("Review these extracted facts. To correct them, edit your CV text above and import it again with Replace my profile selected."));
+    }
+    for status in &step.source_status {
+        body = body.push(widgets::caption(status.clone()));
+    }
+    for error in &state.search_errors {
+        body = body.push(widgets::errors_line(error.clone()));
+    }
+    body.into()
+}
+
+fn first_scan<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Element<'a, Msg> {
+    let mut body = column![widgets::note("Try one saved search: up to three posts matched, with a five-minute limit. Models on cloud providers use your API account. Open Task manager for live stages and cancellation; Job searches shows results and failures.")].spacing(8);
+    if let Some(summary) = &step.scan_summary {
+        body = body.push(widgets::caption(summary.clone()));
+    }
+    if step.progress.skipped_scan {
+        body = body.push(widgets::caption(
+            "First scan deliberately skipped. You can scan from Job searches later.",
+        ));
+    }
+    if let Some(problem) = &step.scan_problem {
+        body = body.push(widgets::caption(problem.clone()));
+    }
+    let mut actions = row![
+        button(text("Try first scan").size(style::BODY_SIZE))
+            .style(style::primary_button)
+            .on_press_maybe(
+                (!state.busy && !state.search_dirty && step.id > 0 && step.scan_problem.is_none())
+                    .then_some(Msg::FirstScan)
+            ),
+        button(text("Skip for now").size(style::BODY_SIZE))
+            .style(style::standard_button)
+            .on_press_maybe((!state.busy).then_some(Msg::SkipScan)),
+        button(text("Review search results").size(style::BODY_SIZE))
+            .style(style::standard_button)
+            .on_press(Msg::ShowSearches),
+    ]
+    .spacing(8);
+    if state.scanning {
+        actions = actions.push(
+            button(text("Stop trial").size(style::BODY_SIZE))
+                .style(style::standard_button)
+                .on_press(Msg::StopScan),
+        );
+    }
+    body.push(actions).into()
 }
 
 fn space_fill<'a>() -> Element<'a, Msg> {
@@ -307,6 +630,8 @@ fn database_step(database: &DatabaseStep) -> Element<'_, Msg> {
         "Your data is kept in"
     };
     column![
+        text(database.system.clone()).size(style::BODY_SIZE),
+        widgets::caption(database.storage.clone()),
         text(format!("{kept} {}.", database.path)).size(style::BODY_SIZE),
         widgets::caption(
             "Your matches, profile, settings and API keys are in this one file. The keys are sealed with a key file kept beside it, so a copy of the database alone doesn't give them away."
@@ -324,9 +649,9 @@ fn ai_step(ai: &AiStep) -> Element<'_, Msg> {
         }
         return body
             .push(
-                button(text("Change it in Language models").size(style::BODY_SIZE))
+                button(text("Review models and task choices").size(style::BODY_SIZE))
                     .style(style::standard_button)
-                    .on_press(Msg::ShowLanguageModels),
+                    .on_press(Msg::ShowLocalModel),
             )
             .into();
     }
@@ -359,14 +684,15 @@ fn ai_step(ai: &AiStep) -> Element<'_, Msg> {
             body = body
                 .push(text("Suggested: an OpenAI API key").font(style::semibold()).size(style::BODY_SIZE))
                 .push(widgets::caption(format!(
-                    "An OpenAI key runs on {} by default; a Claude key works too. This computer has no room on a graphics card for a model good enough for the AI match.",
+                    "An OpenAI key runs on {} by default; a Claude key works too. A fast local AI match is not established from the detected hardware. You can still explore local CPU options in Models.",
                     advice.openai_model
                 )))
                 .push(
                     button(text("Add an API key").size(style::BODY_SIZE))
                         .style(style::primary_button)
                         .on_press(Msg::ShowLanguageModels),
-                );
+                )
+                .push(button(text("Explore local models").size(style::BODY_SIZE)).style(style::standard_button).on_press(Msg::ShowLocalModel));
         }
     }
     body.into()

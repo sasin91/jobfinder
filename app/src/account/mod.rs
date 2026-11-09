@@ -17,6 +17,8 @@ pub mod former_keys;
 pub mod key_vault;
 pub mod llama_setup_service;
 pub mod model_advice;
+pub mod model_assessment;
+pub mod model_plan;
 pub mod saved_key;
 pub mod task_model;
 pub mod task_model_row;

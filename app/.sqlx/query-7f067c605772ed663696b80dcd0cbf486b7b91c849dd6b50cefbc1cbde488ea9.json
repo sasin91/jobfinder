@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE onboarding SET completed = ?1, manual_scan = ?2, skipped_scan = ?3, current_step = ?4 WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7f067c605772ed663696b80dcd0cbf486b7b91c849dd6b50cefbc1cbde488ea9"
+}

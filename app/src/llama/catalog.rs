@@ -51,9 +51,11 @@ pub const QWEN3_4B: &str = "Qwen3-4B-Q4_K_M.gguf";
 
 /// Gemma 4 E4B's file: what reads job posts by default.
 pub const GEMMA_4_E4B: &str = "gemma-4-E4B-it-Q4_K_M.gguf";
+/// IBM's official Q4_K_M artifact; form-answer candidate confirmed by user experience.
+pub const GRANITE_4_1_3B: &str = "granite-4.1-3b-Q4_K_M.gguf";
 
 /// The models offered, smallest first.
-pub const MODELS: [CatalogModel; 6] = [
+pub const MODELS: [CatalogModel; 7] = [
     CatalogModel {
         repo: "Qwen/Qwen3-1.7B-GGUF",
         file: "Qwen3-1.7B-Q8_0.gguf",
@@ -64,9 +66,17 @@ pub const MODELS: [CatalogModel; 6] = [
         fits_every_task: true,
     },
     CatalogModel {
+        repo: "ibm-granite/granite-4.1-3b-GGUF",
+        file: GRANITE_4_1_3B,
+        label: "IBM Granite 4.1 3B: compact candidate for application form answers",
+        bytes: 2_099_501_664,
+        layers: 40,
+        fits_every_task: false,
+    },
+    CatalogModel {
         repo: "Qwen/Qwen3-4B-GGUF",
         file: QWEN3_4B,
-        label: "Qwen3 4B: reads CVs and judges the match; the one to take",
+        label: "Qwen3 4B: compact baseline for CV reading and matching",
         // 2.5 GB.
         bytes: 25 * GB / 10,
         layers: 36,
@@ -75,7 +85,7 @@ pub const MODELS: [CatalogModel; 6] = [
     CatalogModel {
         repo: "unsloth/gemma-4-E4B-it-GGUF",
         file: GEMMA_4_E4B,
-        label: "Gemma 4 E4B: reads Danish job posts best; downloaded when a job post is first read",
+        label: "Gemma 4 E4B: candidate for reading Danish job posts",
         // 4.98 GB.
         bytes: 4_977_171_584,
         layers: 42,
@@ -93,7 +103,7 @@ pub const MODELS: [CatalogModel; 6] = [
     CatalogModel {
         repo: "mradermacher/munin-qwen3.5-9B-GGUF",
         file: "munin-qwen3.5-9B.Q4_K_M.gguf",
-        label: "Munin Qwen3.5 9B: tuned for Danish, writes the best Danish applications, but heavy: a card with 10 GB",
+        label: "Munin Qwen3.5 9B: Danish-tuned writing candidate; needs more memory",
         // 5.78 GB.
         bytes: 5_780_090_944,
         layers: 32,
@@ -102,7 +112,7 @@ pub const MODELS: [CatalogModel; 6] = [
     CatalogModel {
         repo: "Qwen/Qwen3-14B-GGUF",
         file: "Qwen3-14B-Q4_K_M.gguf",
-        label: "Qwen3 14B: better answers, for a card with 12 GB or more",
+        label: "Qwen3 14B: larger alternative; evaluate before switching",
         // 9.0 GB.
         bytes: 90 * GB / 10,
         layers: 40,
@@ -117,7 +127,11 @@ pub const SMALLEST_GOOD_MODEL: &str = QWEN3_4B;
 
 /// Whether model is SMALLEST_GOOD_MODEL or bigger.
 pub fn is_good_enough(model: &CatalogModel) -> bool {
-    find(SMALLEST_GOOD_MODEL).is_some_and(|smallest| model.bytes >= smallest.bytes)
+    // An explicit quality allowlist: parameter count or file size is not evidence.
+    matches!(
+        model.file,
+        QWEN3_4B | GEMMA_4_E4B | "Qwen3-8B-Q4_K_M.gguf" | "munin-qwen3.5-9B.Q4_K_M.gguf" | "Qwen3-14B-Q4_K_M.gguf"
+    )
 }
 
 /// The catalog model with this file name.
@@ -141,6 +155,6 @@ mod tests {
     #[test]
     fn the_smallest_model_isnt_good_enough_and_the_rest_are() {
         let good: Vec<bool> = MODELS.iter().map(is_good_enough).collect();
-        assert_eq!(good, [false, true, true, true, true, true]);
+        assert_eq!(good, [false, false, true, true, true, true, true]);
     }
 }

@@ -63,6 +63,9 @@ sha1 = "0.10"
 sha2 = "0.10"
 # The llama.cpp release the setup wizard downloads, unzipped into the llama folder.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+fs2 = "0.4"
 # Laya on ONNX Runtime, run in this process (ONNX Runtime linked in statically).
 laya-server = { path = "../laya-server" }
 # JobFinder's signed-in browser (job_sites::cdp): its DevTools on 127.0.0.1, over a WebSocket.

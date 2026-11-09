@@ -57,26 +57,39 @@ Recruiter still runs on that folder; close it first. If you loaded the Jobnet ex
 in Edge and load it again from `%APPDATA%\JobFinder\jobnet-joblog` (its ID stays the same). Delete the old `recruiter.exe` afterwards:
 started again, it would make a new empty database in the old folder.
 
-Setup (also under Settings) has these steps:
+Setup (also under Settings) guides you through six steps and remembers your place:
 
-1. where the database is;
-2. an AI model: this app's own llama.cpp model when the PC's graphics card has room for a good
-   one (Qwen3 4B or bigger, at least half of it on the card), else an OpenAI key (gpt-5.4-mini)
-   or a Claude key; the steps are the Local model and Language models screens, which come back to
-   Setup while the database has no profile or saved matches;
-3. your CV, read by that model into your profile, which the Match screen matches with;
-4. how often the job scan runs by itself: a Task Scheduler task, `JobFinder\Job scan`, running
-   `jobfinder.exe scan`, which scans every active job search (Job scan in the menu) for new
-   posts and matches them with your profile. It reads Jobnet and Jobindex itself, so it runs on
-   any model, the app's own too; with an OpenAI key it also searches the web for other sites. The Match screen's Scan now runs the same scan.
-   LinkedIn and Indeed are read too, in a browser
-   of JobFinder's own (Edge, on its own profile in `%APPDATA%\JobFinder\signed-in-browser`):
-   press **Sign in to job sites** under Job searches once, sign in, and close the window. A scan
-   reads two search terms per site and the new posts, one page every 10 seconds or more, and stops
-   reading a site the moment it asks to sign in again or for a check (the Job searches screen says
-   so until you sign in again). Both sites' terms forbid reading them with programs: your account
-   takes that risk. Every search reads every site; a search's "Sites to skip" leaves sites out
-   (`indeed.com`, say), the web search's posts on them too.
+1. **Welcome:** where your data lives.
+2. **Models:** choose local AI or a cloud provider. The Models overview in the sidebar
+   explains which model handles each task, its local alternative and why it is suggested.
+   On a fresh local setup, **Download and prepare local plan** downloads shared models once
+   and saves the task assignments. IBM Granite 4.1 3B Q4_K_M is offered for form answers;
+   Qwen3 4B is the compact CV/matching baseline, and Gemma is a job-reading alternative
+   when it fits on the GPU. Existing providers and explicit task choices are preserved.
+3. **Your CV:** import a PDF, text file or pasted CV. Check the extracted facts before
+   matching; edited CV text can replace the profile. Importing a CV does not finish setup.
+4. **Jobs and sites:** save your first search, location and remote preference. Choose
+   Jobnet, Jobindex, LinkedIn and Indeed individually. Signed-in sites start disabled.
+   **Sign in to job sites** opens JobFinder's browser; scans pause when sign-in or a
+   person check is needed. OpenAI job evaluation also enables its web search.
+   Automatic application/resume writing starts disabled (threshold 101); choose 0–100
+   to enable it for matches at or above that score.
+5. **First scan:** try one search, matching up to three posts within five active minutes,
+   or deliberately skip it. Task manager shows work in progress; Job searches shows
+   found posts and individual failures. Configured cloud tasks use your API account.
+6. **Schedule:** choose automatic checks or manual scanning, then finish. A new setup
+   remains resumable until you finish explicitly. Existing users also review
+   onboarding once, with their saved models, profile, searches and matches kept.
+
+**Evaluate again** in Models refreshes hardware and fit estimates without changing
+assignments or downloading anything. **Run local check** loads the assigned downloaded
+model and checks a small synthetic task fixture, reporting pass/failure and elapsed time.
+These checks are compatibility/correctness smoke tests, not proof of overall model quality.
+Use the advanced provider/task controls in Language models for manual choices.
+
+Local downloads show progress and can resume after restarting the app when the source
+supports ranges and supplies a file validator. Changed files restart cleanly. Model setup
+checks disk space, and partial files are kept separate from installed models.
 
 Close its window to stop it. `jobfinder.exe --help` lists the options.
 

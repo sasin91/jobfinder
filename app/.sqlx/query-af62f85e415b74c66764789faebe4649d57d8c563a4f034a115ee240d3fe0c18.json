@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO model_checks (assessment_id, task, model, checked_at, elapsed_ms, passed, detail)\nVALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "af62f85e415b74c66764789faebe4649d57d8c563a4f034a115ee240d3fe0c18"
+}

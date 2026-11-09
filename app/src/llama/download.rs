@@ -1,5 +1,5 @@
-//! The setup wizard's downloads: llama.cpp's Windows build for this computer's graphics card,
-//! from its latest GitHub release, unzipped into the llama folder; and a catalog model into the
+//! The setup wizard's downloads: the platform's llama.cpp build for this computer's graphics
+//! card, from its GitHub releases, installed into the llama folder; and a catalog model into the
 //! models folder. One download runs at a time, in the background, and Downloads says how far it
 //! is for the page to show.
 //!
@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use super::catalog::CatalogModel;
@@ -134,6 +134,40 @@ pub fn assets_for(build: Build, assets: &[Asset]) -> Result<Vec<Asset>, String> 
             .find(|asset| asset.name == runtime_name)
             .ok_or_else(|| format!("There's no {runtime_name} in the release."))?;
         wanted.push(runtime.clone());
+    }
+    Ok(wanted)
+}
+
+/// Select explicitly by target; a Linux host must never install Windows executables.
+pub fn assets_for_target(build: Build, assets: &[Asset], os: &str, arch: &str) -> Result<Vec<Asset>, String> {
+    if os == "windows" && arch == "x86_64" {
+        return assets_for(build, assets);
+    }
+    if os != "linux" || !matches!(arch, "x86_64" | "aarch64") {
+        return Err(format!(
+            "Automatic llama.cpp installation is not available for {os}/{arch}. Install llama-server on PATH instead."
+        ));
+    }
+    let arch = if arch == "x86_64" { "x64" } else { "arm64" };
+    let suffix = match build {
+        Build::Cpu => format!("-bin-ubuntu-{arch}.tar.gz"),
+        Build::Vulkan => format!("-bin-ubuntu-vulkan-{arch}.tar.gz"),
+        Build::Cuda => format!("-bin-ubuntu-cuda-12.8-{arch}.tar.gz"),
+    };
+    // CUDA 12.8 has wider driver compatibility than newer releases. A missing compatible
+    // build is actionable; do not silently download a build requiring a newer driver.
+    let chosen = assets.iter().find(|a| a.name.starts_with("llama-") && a.name.ends_with(&suffix))
+        .ok_or_else(|| format!("No Linux {} {arch} runtime in this release. Install a compatible llama-server on PATH or use another provider.", build.name()))?;
+    let mut wanted = vec![chosen.clone()];
+    if build == Build::Cuda {
+        let runtime = format!("cudart-{}", chosen.name);
+        wanted.push(
+            assets
+                .iter()
+                .find(|a| a.name == runtime)
+                .ok_or_else(|| format!("The CUDA runtime {runtime} is missing."))?
+                .clone(),
+        );
     }
     Ok(wanted)
 }
@@ -296,7 +330,11 @@ impl Downloads {
         let unzipping = Unzipping::start(&self.unzipping);
         tokio::task::spawn_blocking(move || {
             let _unzipping = unzipping;
-            unzip(&zip_path, &into)
+            if zip_path.to_string_lossy().ends_with(".tar.gz") {
+                untar(&zip_path, &into)
+            } else {
+                unzip(&zip_path, &into)
+            }
         })
         .await
         .map_err(|e| format!("Unzipping {name} stopped: {e}"))?
@@ -357,6 +395,8 @@ pub async fn download_server(folder: &Path, inventory: &Inventory, downloads: &D
         ));
     }
     move_into(&staging, folder).map_err(|e| format!("Couldn't move llama.cpp into {}: {e}", folder.display()))?;
+    std::fs::write(folder.join("runtime-release.txt"), &release.tag_name)
+        .map_err(|e| format!("Couldn't record the installed runtime version: {e}"))?;
     println!(
         "llama: llama.cpp {} ({}) is in {}.",
         release.tag_name,
@@ -368,8 +408,11 @@ pub async fn download_server(folder: &Path, inventory: &Inventory, downloads: &D
 
 /// The newest of the last RELEASES_SEARCHED releases with build's zips, and those zips.
 async fn newest_release_with(client: &reqwest::Client, build: Build) -> Result<(Release, Vec<Asset>), String> {
-    let program = format!("llama.cpp's Windows {} build", build.name());
-    newest_release_having(client, RELEASES, &program, |assets| assets_for(build, assets)).await
+    let program = format!("llama.cpp's {} {} build", std::env::consts::OS, build.name());
+    newest_release_having(client, RELEASES, &program, |assets| {
+        assets_for_target(build, assets, std::env::consts::OS, std::env::consts::ARCH)
+    })
+    .await
 }
 
 /// The newest of the last RELEASES_SEARCHED releases at releases (a GitHub API releases URL) whose
@@ -451,17 +494,36 @@ pub(crate) async fn download_file(
     if running_work::stop_asked() {
         return Err(Stopped::SAID.to_string());
     }
-    let Some(mut response) = get_from(client, url, 0, None).await? else {
+    let part = part_path(to);
+    let metadata = part.with_extension("resume.json");
+    let (mut done, mut version) = resume_from(url, to);
+    let mut answer = get_from(client, url, done, version.as_ref()).await?;
+    if answer.is_none() {
+        done = 0;
+        answer = get_from(client, url, 0, None).await?;
+    }
+    let Some(mut response) = answer else {
         return Err(format!("{url} couldn't be downloaded: the server sent nothing."));
     };
-    let mut total = response.content_length();
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        done = 0;
+    }
+    validate_range(&response, done)?;
+    let mut total = response.content_length().map(|length| length + done);
+    if let Some(total) = total {
+        ensure_space(to.parent().unwrap_or(Path::new(".")), total.saturating_sub(done))?;
+    }
     // What the server says this version of the file is, so a resume gets the rest of this one.
-    let mut version = version_of(&response);
-    let part = part_path(to);
-    let mut file = tokio::fs::File::create(&part)
+    version = version_of(&response);
+    write_resume(&metadata, url, version.as_ref())?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(done == 0)
+        .open(&part)
         .await
         .map_err(|e| format!("Couldn't write {}: {e}", part.display()))?;
-    let mut done = 0u64;
+    file.seek(io::SeekFrom::Start(done)).await.map_err(|e| e.to_string())?;
     downloads.set_bytes(done, total);
     loop {
         // All of it came already: the end is read from this answer, paused or not.
@@ -477,6 +539,14 @@ pub(crate) async fn download_file(
                 break;
             };
             response = rest;
+            validate_range(
+                &response,
+                if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                    done
+                } else {
+                    0
+                },
+            )?;
             if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                 // The whole file again: start over.
                 file.set_len(0)
@@ -486,6 +556,7 @@ pub(crate) async fn download_file(
                 done = 0;
                 total = response.content_length();
                 version = version_of(&response);
+                write_resume(&metadata, url, version.as_ref())?;
                 downloads.set_bytes(done, total);
             }
         }
@@ -509,9 +580,94 @@ pub(crate) async fn download_file(
     if total.is_some_and(|total| total != done) {
         return Err(format!("The download of {url} ended early ({done} bytes)."));
     }
+    if to.extension().is_some_and(|extension| extension == "gguf") {
+        use std::io::Read;
+        let mut magic = [0u8; 4];
+        std::fs::File::open(&part)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .map_err(|e| e.to_string())?;
+        if &magic != b"GGUF" {
+            return Err("The download is not a GGUF model. Retry or choose another source.".to_string());
+        }
+    }
     tokio::fs::rename(&part, to)
         .await
-        .map_err(|e| format!("Couldn't move {} to {}: {e}", part.display(), to.display()))
+        .map_err(|e| format!("Couldn't move {} to {}: {e}", part.display(), to.display()))?;
+    let _ = std::fs::remove_file(metadata);
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct Resume {
+    url: String,
+    version: String,
+}
+
+/// Use the same recovery eligibility for the plan's storage estimate and the request.
+fn resume_from(url: &str, to: &Path) -> (u64, Option<reqwest::header::HeaderValue>) {
+    let part = part_path(to);
+    let version = std::fs::read(part.with_extension("resume.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Resume>(&bytes).ok())
+        .filter(|r| r.url == url && !r.version.is_empty() && !r.version.starts_with("W/"))
+        .and_then(|r| reqwest::header::HeaderValue::from_str(&r.version).ok());
+    let done = if version.is_some() {
+        std::fs::metadata(part).map_or(0, |m| m.len())
+    } else {
+        0
+    };
+    (done, version)
+}
+
+/// A remote version change can still require a full transfer. download_file checks the
+/// actual response's remaining size before writing, even after this optimistic estimate.
+pub(crate) fn remaining_bytes(url: &str, to: &Path, full_bytes: u64) -> u64 {
+    full_bytes.saturating_sub(resume_from(url, to).0)
+}
+
+fn write_resume(path: &Path, url: &str, version: Option<&reqwest::header::HeaderValue>) -> Result<(), String> {
+    if let Some(version) = version.and_then(|v| v.to_str().ok()) {
+        let value = serde_json::to_vec(&Resume {
+            url: url.to_string(),
+            version: version.to_string(),
+        })
+        .map_err(|e| e.to_string())?;
+        std::fs::write(path, value).map_err(|e| format!("Couldn't save download recovery information: {e}"))?;
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+fn validate_range(response: &reqwest::Response, offset: u64) -> Result<(), String> {
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !range.starts_with(&format!("bytes {offset}-")) {
+            return Err(
+                "The server returned an unexpected download range. Remove the .part file and retry.".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_space(folder: &Path, bytes: u64) -> Result<(), String> {
+    let available =
+        fs2::available_space(folder).map_err(|e| format!("Couldn't check storage at {}: {e}", folder.display()))?;
+    let required = bytes.saturating_add(512 * 1024 * 1024);
+    if available < required {
+        return Err(format!(
+            "Not enough space in {}: need {} including a 0.5 GB reserve; {} available. Choose another models folder or free space.",
+            folder.display(),
+            super::hardware::gigabytes(required),
+            super::hardware::gigabytes(available)
+        ));
+    }
+    Ok(())
 }
 
 /// What a response says its file's version is, for If-Range: its ETag when that is a strong one,
@@ -595,10 +751,63 @@ fn unzip(zip: &Path, folder: &Path) -> io::Result<()> {
             std::fs::create_dir_all(&target)?;
             continue;
         }
+        ensure_space(folder, entry.size()).map_err(io::Error::other)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
         io::copy(&mut entry, &mut std::fs::File::create(&target)?)?;
+    }
+    Ok(())
+}
+
+/// Upstream tarballs have a release directory, bin/ and lib/. Flatten regular files into
+/// the private runtime folder, with safe relative symlinks for versioned shared libraries.
+fn untar(path: &Path, folder: &Path) -> io::Result<()> {
+    let stream = flate2::read::GzDecoder::new(std::fs::File::open(path)?);
+    let mut archive = tar::Archive::new(stream);
+    let mut links = Vec::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let relative = entry.path()?.into_owned();
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(io::Error::other("Runtime archive contains a path outside its folder."));
+        }
+        let Some(name) = relative.file_name() else { continue };
+        let kind = entry.header().entry_type();
+        let target = folder.join(name);
+        if kind.is_file() {
+            if target.exists() {
+                return Err(io::Error::other("Duplicate runtime archive filename."));
+            }
+            ensure_space(folder, entry.size()).map_err(io::Error::other)?;
+            io::copy(&mut entry, &mut std::fs::File::create(&target)?)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(entry.header().mode()? & 0o777))?;
+            }
+        } else if kind.is_symlink() {
+            let link = entry
+                .link_name()?
+                .ok_or_else(|| io::Error::other("Missing archive link target"))?
+                .into_owned();
+            if link.components().count() != 1
+                || !matches!(link.components().next(), Some(std::path::Component::Normal(_)))
+            {
+                return Err(io::Error::other("Runtime archive link must stay in its folder."));
+            }
+            links.push((target, link));
+        } else if !kind.is_dir() {
+            return Err(io::Error::other("Unsupported entry in runtime archive."));
+        }
+    }
+    #[cfg(unix)]
+    for (target, link) in links {
+        std::os::unix::fs::symlink(link, target)?;
     }
     Ok(())
 }
@@ -608,6 +817,173 @@ mod tests {
     use std::io::Write;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires JOBFINDER_TEST_RUNTIME_ARCHIVE pointing to an official downloaded Linux CPU archive"]
+    fn official_linux_runtime_installs_and_starts() {
+        let archive = std::env::var_os("JOBFINDER_TEST_RUNTIME_ARCHIVE").expect("archive path");
+        let folder = std::env::temp_dir().join(format!("jobfinder-official-runtime-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        untar(Path::new(&archive), &folder).unwrap();
+        let result = std::process::Command::new(folder.join(SERVER_FILE))
+            .arg("--version")
+            .env("LD_LIBRARY_PATH", &folder)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn linux_assets_never_select_windows_and_require_matching_cuda_runtime() {
+        let assets = [
+            asset("llama-b12211-bin-win-vulkan-x64.zip"),
+            asset("llama-b12211-bin-ubuntu-vulkan-x64.tar.gz"),
+            asset("llama-b12211-bin-ubuntu-x64.tar.gz"),
+            asset("llama-b12211-bin-ubuntu-cuda-12.8-x64.tar.gz"),
+            asset("cudart-llama-b12211-bin-ubuntu-cuda-12.8-x64.tar.gz"),
+        ];
+        assert_eq!(
+            names(&assets_for_target(Build::Vulkan, &assets, "linux", "x86_64").unwrap()),
+            ["llama-b12211-bin-ubuntu-vulkan-x64.tar.gz"]
+        );
+        assert_eq!(
+            assets_for_target(Build::Cuda, &assets, "linux", "x86_64")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(assets_for_target(Build::Cuda, &assets[..4], "linux", "x86_64").is_err());
+        assert!(assets_for_target(Build::Cpu, &assets, "linux", "riscv64").is_err());
+        assert!(assets_for_target(Build::Vulkan, &release(), "linux", "x86_64").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_archive_flattens_the_release_and_preserves_executable_and_library_links() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = std::env::temp_dir().join(format!("jobfinder-tar-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("build.tar.gz");
+        let gz = flate2::write::GzEncoder::new(std::fs::File::create(&path).unwrap(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_size(4);
+        header.set_cksum();
+        tar.append_data(&mut header, "llama-release/llama-server", &b"ELF!"[..])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(3);
+        header.set_cksum();
+        tar.append_data(&mut header, "llama-release/libggml.so.1", &b"lib"[..])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        tar.append_link(&mut header, "llama-release/libggml.so", "libggml.so.1")
+            .unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+        let into = folder.join("out");
+        std::fs::create_dir_all(&into).unwrap();
+        untar(&path, &into).unwrap();
+        assert_eq!(std::fs::read(into.join("libggml.so")).unwrap(), b"lib");
+        assert_ne!(
+            std::fs::metadata(into.join("llama-server"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_resumes_after_restart_and_changed_versions_restart_cleanly() {
+        use axum::{
+            Router,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+        };
+        let app = Router::new()
+            .route(
+                "/same",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(headers.get("range").unwrap(), "bytes=4-");
+                    assert_eq!(headers.get("if-range").unwrap(), "\"v1\"");
+                    (
+                        StatusCode::PARTIAL_CONTENT,
+                        [("etag", "\"v1\""), ("content-range", "bytes 4-7/8")],
+                        "efgh",
+                    )
+                }),
+            )
+            .route("/changed", get(|| async { ([("etag", "\"v2\"")], "new file") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let folder = std::env::temp_dir().join(format!("jobfinder-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (route, expected) in [("same", "abcdefgh"), ("changed", "new file")] {
+            let to = folder.join(route);
+            let part = part_path(&to);
+            let url = format!("http://{address}/{route}");
+            std::fs::write(&part, "abcd").unwrap();
+            write_resume(
+                &part.with_extension("resume.json"),
+                &url,
+                Some(&reqwest::header::HeaderValue::from_static("\"v1\"")),
+            )
+            .unwrap();
+            assert_eq!(
+                remaining_bytes(&url, &to, 8),
+                4,
+                "credit the same prefix the request resumes"
+            );
+            download_file(&client, &url, &to, &Downloads::default()).await.unwrap();
+            assert_eq!(std::fs::read_to_string(&to).unwrap(), expected);
+            assert!(!part.exists());
+        }
+        task.abort();
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn partial_credit_requires_matching_usable_recovery_metadata() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-partial-credit-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let to = folder.join("model.gguf");
+        let part = part_path(&to);
+        let metadata = part.with_extension("resume.json");
+        let url = "https://example.com/model.gguf";
+        std::fs::write(&part, "GGUF").unwrap();
+        assert_eq!(remaining_bytes(url, &to, 8), 8);
+        for value in [
+            r#"{"url":"https://example.com/other.gguf","version":"\"v1\""}"#,
+            r#"{"url":"https://example.com/model.gguf","version":""}"#,
+            r#"{"url":"https://example.com/model.gguf","version":"W/\"v1\""}"#,
+            "broken json",
+        ] {
+            std::fs::write(&metadata, value).unwrap();
+            assert_eq!(remaining_bytes(url, &to, 8), 8);
+        }
+        write_resume(
+            &metadata,
+            url,
+            Some(&reqwest::header::HeaderValue::from_static("\"v1\"")),
+        )
+        .unwrap();
+        assert_eq!(remaining_bytes(url, &to, 8), 4);
+        std::fs::remove_file(part).unwrap();
+        assert_eq!(remaining_bytes(url, &to, 8), 8);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 
     #[test]
     fn no_download_starts_while_a_stopped_ones_unzip_runs() {

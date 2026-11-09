@@ -94,7 +94,13 @@ async fn task_model_of(context: &Context, task: &Task, key: &KeyFor) -> Result<S
             format!("The model for {what} couldn't be read: {e}"),
         )
     })?;
-    Ok(task_model::model_for(task, &key.provider, &key.model, &saved))
+    Ok(crate::account::model_plan::resolved(
+        task,
+        &key.provider,
+        &key.model,
+        &saved,
+        context.llama.as_ref(),
+    ))
 }
 
 /// Why there's no key to use: none picked for this use, the picked one's key no longer kept, or

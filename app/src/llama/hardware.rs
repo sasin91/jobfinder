@@ -3,13 +3,14 @@
 //! Win32_VideoController.AdapterRAM, which penny reads, is 32 bits and so says 4 GB on any bigger
 //! card.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Bytes in a gibibyte, which sizes are shown in.
 pub const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Who made a graphics card, which decides the compute libraries llama.cpp needs for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GpuVendor {
     Nvidia,
     Amd,
@@ -36,7 +37,7 @@ impl GpuVendor {
 }
 
 /// A graphics card and its own memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gpu {
     pub name: String,
     pub vendor: GpuVendor,
@@ -44,7 +45,7 @@ pub struct Gpu {
 }
 
 /// The computer's memory and its biggest graphics card, if it has one with memory of its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     pub memory_bytes: u64,
     pub gpu: Option<Gpu>,
@@ -70,6 +71,7 @@ impl fmt::Display for Inventory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} memory", gigabytes(self.memory_bytes))?;
         match &self.gpu {
+            Some(gpu) if gpu.vram_bytes == 0 => write!(f, ", {} (dedicated memory unknown)", gpu.name),
             Some(gpu) => write!(f, ", {} with {}", gpu.name, gigabytes(gpu.vram_bytes)),
             None => f.write_str(", no graphics card with memory of its own"),
         }
@@ -163,9 +165,9 @@ mod platform {
             .map_or(0, |kib| kib * KIB)
     }
 
-    /// Only read on Windows, the app's home: elsewhere the model runs from memory.
+    /// DRM covers native Linux; nvidia-smi also covers WSL's GPU exposure.
     pub fn biggest_gpu() -> Option<Gpu> {
-        None
+        crate::llama::linux_hardware::detect(std::path::Path::new("/sys/class/drm"))
     }
 }
 

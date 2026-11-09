@@ -15,6 +15,8 @@ pub mod catalog;
 pub mod download;
 pub mod gguf;
 pub mod hardware;
+#[cfg(not(windows))]
+mod linux_hardware;
 pub mod llama_server;
 pub mod model_choice;
 pub mod model_gate;

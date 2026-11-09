@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT task, model, checked_at, elapsed_ms, passed AS \"passed!: bool\", detail\nFROM model_checks WHERE assessment_id = 1 ORDER BY task\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "task",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_checks",
+            "name": "task"
+          }
+        }
+      },
+      {
+        "name": "model",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_checks",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "name": "checked_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_checks",
+            "name": "checked_at"
+          }
+        }
+      },
+      {
+        "name": "elapsed_ms",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_checks",
+            "name": "elapsed_ms"
+          }
+        }
+      },
+      {
+        "name": "passed!: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_checks",
+            "name": "passed"
+          }
+        }
+      },
+      {
+        "name": "detail",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_checks",
+            "name": "detail"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2bd555a8f2ab3aa9884b0fa74bc53175825f4c9a1354700f0ba2bfe1601bdc76"
+}

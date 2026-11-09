@@ -137,7 +137,7 @@ pub struct LlamaServer {
     find_on_path: fn(&str) -> Option<PathBuf>,
     /// Where the models are (models_folder::read), changed by move_models.
     models_folder: std::sync::RwLock<PathBuf>,
-    inventory: Inventory,
+    inventory: std::sync::RwLock<Inventory>,
     running: Mutex<Option<Running>>,
     /// The calls on the running server and the model they run on (model_gate), which start waits
     /// on before switching models and stop_if_idle reads.
@@ -159,7 +159,7 @@ impl LlamaServer {
             find_on_path: on_path,
             models_folder: std::sync::RwLock::new(models_folder::read(&folder)),
             folder,
-            inventory,
+            inventory: std::sync::RwLock::new(inventory),
             running: Mutex::new(None),
             calls: Arc::default(),
             downloads: Downloads::default(),
@@ -201,8 +201,13 @@ impl LlamaServer {
         Ok(moved)
     }
 
-    pub fn inventory(&self) -> &Inventory {
-        &self.inventory
+    pub fn inventory(&self) -> Inventory {
+        self.inventory.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Explicitly requested from Models; never changes saved task assignments.
+    pub fn refresh_inventory(&self, inventory: Inventory) {
+        *self.inventory.write().unwrap_or_else(|p| p.into_inner()) = inventory;
     }
 
     /// The llama-server to run: the llama folder's, else one already on this computer's PATH
@@ -229,10 +234,10 @@ impl LlamaServer {
     /// for it, so there is nothing missing to say yet.
     pub fn card_usable(&self) -> Result<bool, String> {
         let Some(server) = self.server_path() else {
-            return Ok(self.inventory.gpu.is_some());
+            return Ok(self.inventory().gpu.is_some());
         };
         let server_folder = server.parent().unwrap_or(&self.folder);
-        model_choice::card_usable(&self.inventory, &model_choice::compute_libraries(server_folder))
+        model_choice::card_usable(&self.inventory(), &model_choice::compute_libraries(server_folder))
     }
 
     pub fn overview(&self) -> Overview {
@@ -240,16 +245,16 @@ impl LlamaServer {
         let card_usable = card.as_ref().is_ok_and(|usable| *usable);
         let models = self.models();
         let chosen =
-            model_choice::choose(&models, "", &self.inventory, card_usable).map(|(model, _)| model.name.clone());
+            model_choice::choose(&models, "", &self.inventory(), card_usable).map(|(model, _)| model.name.clone());
         Overview {
             folder: self.folder.clone(),
             models_folder: self.models_folder(),
             server: self.server_path(),
-            inventory: self.inventory.clone(),
+            inventory: self.inventory(),
             card_problem: card.err(),
             models: models
                 .iter()
-                .map(|model| (model.clone(), model_choice::fit(model, &self.inventory, card_usable)))
+                .map(|model| (model.clone(), model_choice::fit(model, &self.inventory(), card_usable)))
                 .collect(),
             chosen,
         }
@@ -297,7 +302,7 @@ impl LlamaServer {
         };
         let card = self.card_usable()?;
         let models = self.models();
-        let (model, fit) = model_choice::choose(&models, named, &self.inventory, card)?;
+        let (model, fit) = model_choice::choose(&models, named, &self.inventory(), card)?;
         // Counted as under way from here, so stop_if_idle leaves the server running for it.
         let turn = self.calls.enter(&model.path).await;
         let mut running = self.running.lock().await;
@@ -340,7 +345,18 @@ impl LlamaServer {
             .try_clone()
             .map_err(|e| format!("Couldn't write {}: {e}", log_path.display()))?;
         let alias = model_alias(model);
-        let mut child = crate::no_window::in_background(&mut Command::new(server))
+        let mut command = Command::new(server);
+        #[cfg(target_os = "linux")]
+        {
+            let mut paths = vec![server.parent().unwrap_or(&self.folder).to_path_buf()];
+            if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(path) = std::env::join_paths(paths) {
+                command.env("LD_LIBRARY_PATH", path);
+            }
+        }
+        let mut child = crate::no_window::in_background(&mut command)
             .current_dir(&self.folder)
             .args(server_arguments(model, &alias, port, fit, background_threads()))
             .stdin(Stdio::null())
