@@ -79,6 +79,9 @@ pub struct Dashboard {
     /// "Everything is set up." or "2 things need your attention."
     pub headline: String,
     pub all_ready: bool,
+    pub privacy: StatusRow,
+    pub setup_complete: usize,
+    pub setup_total: usize,
     pub rows: Vec<StatusRow>,
 }
 
@@ -102,6 +105,18 @@ pub async fn dashboard(context: &Context) -> Result<Dashboard, String> {
     let cv = setup_steps::cv(context).await?;
     let schedule = setup_steps::schedule(context).await;
     let scan = scan_service::status(context).await.map_err(|e| e.message)?;
+    let saved = crate::account::account_model::saved(context.db())
+        .await
+        .map_err(database)?;
+    let progress = crate::setup::progress::read(context.db()).await.map_err(database)?;
+    let setup_checks = [
+        uses.resume,
+        uses.application,
+        uses.job_evaluation,
+        cv.filled.is_some(),
+        scan.active_searches > 0,
+        schedule.interval_hours.is_some() || progress.manual_scan,
+    ];
     let rows = vec![
         ai_row(&ai.saved, uses.any()),
         cv_row(cv.filled.as_ref()),
@@ -111,11 +126,75 @@ pub async fn dashboard(context: &Context) -> Result<Dashboard, String> {
     ];
     let attention = rows.iter().filter(|row| row.health == Health::Attention).count();
     Ok(Dashboard {
+        privacy: privacy_row(&saved),
+        setup_complete: setup_checks.iter().filter(|ready| **ready).count(),
+        setup_total: setup_checks.len(),
         ai_missing: !uses.any(),
-        headline: headline(attention),
-        all_ready: attention == 0,
+        headline: if attention == 0 && !setup_checks.iter().all(|ready| *ready) {
+            "Core setup is incomplete. Review the essentials below.".into()
+        } else {
+            headline(attention)
+        },
+        all_ready: attention == 0 && setup_checks.iter().all(|ready| *ready),
         rows,
     })
+}
+
+/// Shared guidance shown before choosing a provider or importing a CV.
+pub const PRIVACY_GUIDANCE: &str = "Using OpenAI, Anthropic or another hosted provider sends your CV text and relevant profile details to that provider when AI tasks run. For best privacy, use models running on your own computer for every task. Remove saved cloud keys to prevent game mode from using them as a fallback. A remote model server also receives your data.";
+
+fn privacy_row(saved: &[crate::account::account_model::Saved]) -> StatusRow {
+    use crate::llm::{ANTHROPIC, LLAMA_CPP, LOCAL, OPENAI};
+    let active: Vec<_> = saved.iter().filter(|key| key.uses.any()).collect();
+    let local = |key: &crate::account::account_model::Saved| {
+        key.provider == LLAMA_CPP || (key.provider == LOCAL && local_endpoint(&key.base_url))
+    };
+    let fallback = active
+        .iter()
+        .any(|key| matches!(key.provider.as_str(), LLAMA_CPP | LOCAL))
+        && saved
+            .iter()
+            .any(|key| matches!(key.provider.as_str(), OPENAI | ANTHROPIC));
+    let (health, text) = if active.is_empty() {
+        (
+            Health::Neutral,
+            "No AI tasks selected. CV data is not sent to an AI provider by configured tasks.",
+        )
+    } else if active.iter().any(|key| !local(key)) {
+        (
+            Health::Attention,
+            "External AI configured. Your CV text and profile details are sent to the selected provider or remote server when those tasks run.",
+        )
+    } else if fallback {
+        (
+            Health::Attention,
+            "Local AI with cloud fallback. Game mode can send your CV and profile details to a saved cloud provider. Remove cloud keys for local-only AI.",
+        )
+    } else {
+        (
+            Health::Ready,
+            "Local-only AI configured. Best CV privacy. Selected AI tasks run on this computer, with no saved cloud fallback.",
+        )
+    };
+    StatusRow {
+        name: "CV privacy",
+        health,
+        text: text.into(),
+        fix: Some(Fix {
+            href: "account",
+            label: "Review models",
+        }),
+        action: None,
+    }
+}
+
+fn local_endpoint(endpoint: &str) -> bool {
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host == "localhost" || host == "[::1]" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        })
 }
 
 pub async fn findings(context: &Context) -> Result<Findings, String> {
@@ -337,6 +416,46 @@ fn extension_row(folder: &Result<std::path::PathBuf, String>) -> StatusRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_includes_cloud_fallback_and_remote_servers() {
+        use crate::account::account_model::Saved;
+        use crate::llm::{ANTHROPIC, LLAMA_CPP, LOCAL, OPENAI};
+        let mut key = Saved {
+            provider: LLAMA_CPP.into(),
+            model: String::new(),
+            base_url: String::new(),
+            key_hint: String::new(),
+            updated_at: 0,
+            uses: crate::matches::match_documents::Uses {
+                resume: true,
+                application: true,
+                job_evaluation: true,
+            },
+        };
+        assert_eq!(privacy_row(&[]).health, Health::Neutral);
+        assert_eq!(privacy_row(&[key.clone()]).health, Health::Ready);
+        let mut cloud = key.clone();
+        cloud.provider = OPENAI.into();
+        cloud.uses = Default::default();
+        assert_eq!(privacy_row(&[key.clone(), cloud.clone()]).health, Health::Attention);
+        cloud.provider = ANTHROPIC.into();
+        assert_eq!(privacy_row(&[key.clone(), cloud.clone()]).health, Health::Attention);
+        assert_eq!(privacy_row(&[cloud.clone()]).health, Health::Neutral);
+        cloud.uses.resume = true;
+        assert_eq!(privacy_row(&[key.clone(), cloud]).health, Health::Attention);
+        key.provider = LOCAL.into();
+        for endpoint in ["http://localhost:1234", "http://127.0.0.1:11434", "http://[::1]:1234"] {
+            key.base_url = endpoint.into();
+            assert_eq!(privacy_row(&[key.clone()]).health, Health::Ready);
+        }
+        for endpoint in ["http://192.168.1.2:1234", "https://127.example.com", "invalid", ""] {
+            key.base_url = endpoint.into();
+            assert_eq!(privacy_row(&[key.clone()]).health, Health::Attention);
+        }
+        key.provider = OPENAI.into();
+        assert_eq!(privacy_row(&[key]).health, Health::Attention);
+    }
 
     #[test]
     fn the_headline_counts_what_needs_attention() {

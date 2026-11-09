@@ -506,7 +506,10 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     }
     let content = match state.stage {
         0 => step("Welcome — your data and this computer", true, database_step(&steps.database)),
-        1 => step("Choose your models", done[1], local_model::setup_view(&state.models).map(Msg::Models)),
+        1 => step("Choose your models", done[1], column![
+            widgets::message_bar(Health::Attention, crate::dashboard::PRIVACY_GUIDANCE),
+            local_model::setup_view(&state.models).map(Msg::Models),
+        ].spacing(12).into()),
         2 => step("Import and review your CV", done[2], cv_step(&steps.cv, state)),
         3 => step("Define your jobs and choose sites", done[3], search_step(&steps.search, state)),
         4 => step("Try your first scan", done[4], first_scan(&steps.search, state)),
@@ -727,7 +730,10 @@ fn database_step(database: &DatabaseStep) -> Element<'_, Msg> {
 }
 
 fn cv_step<'a>(cv: &'a CvStep, state: &'a State) -> Element<'a, Msg> {
-    let mut body = Column::new().spacing(8);
+    let mut body = Column::new().spacing(8).push(widgets::message_bar(
+        Health::Attention,
+        crate::dashboard::PRIVACY_GUIDANCE,
+    ));
     if let Some(filled) = &cv.filled {
         body = body.push(
             text(format!(

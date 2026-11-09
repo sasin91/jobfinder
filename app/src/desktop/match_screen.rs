@@ -2,7 +2,7 @@
 //! as the match page shows them (dashboard.rs). Match a job, a list's tile and a match on the
 //! shortlist open their pages in the window (matching).
 
-use iced::widget::{Column, button, column, container, row, text};
+use iced::widget::{Column, button, column, container, progress_bar, row, text};
 use iced::{Center, Element, Fill};
 
 use super::matching::{self, Page};
@@ -41,6 +41,32 @@ pub fn view(overview: Option<&Result<super::Overview, String>>) -> Element<'_, M
     let mut screen = Column::new()
         .spacing(GAP * 1.5)
         .push(heading("Overview", headline.into()));
+    screen = screen.push(section(
+        "Privacy & setup",
+        column![
+            status_row(&dashboard.privacy),
+            container(
+                column![
+                    text(format!(
+                        "Setup: {} of {} essentials configured",
+                        dashboard.setup_complete, dashboard.setup_total
+                    ))
+                    .font(style::semibold())
+                    .size(style::BODY_SIZE),
+                    progress_bar(0.0..=dashboard.setup_total as f32, dashboard.setup_complete as f32),
+                    text("Three AI uses, your profile, an active job search, and a scheduled or manual scan choice.")
+                        .size(style::CAPTION_SIZE)
+                        .style(style::secondary),
+                    button(text("Continue setup"))
+                        .style(style::standard_button)
+                        .on_press(open("setup")),
+                ]
+                .spacing(8)
+            )
+            .padding(CARD_PADDING),
+        ]
+        .into(),
+    ));
     if dashboard.ai_missing {
         screen =
             screen.push(

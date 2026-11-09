@@ -358,7 +358,10 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         "Language models",
         widgets::note("The AI runs on your own OpenAI or Anthropic key, or on a model on this computer."),
     );
-    let mut screen = Column::new().spacing(GAP * 1.5).push(title);
+    let mut screen = Column::new().spacing(GAP * 1.5).push(title).push(widgets::message_bar(
+        Health::Attention,
+        crate::dashboard::PRIVACY_GUIDANCE,
+    ));
     if let Some((health, said)) = &state.said {
         screen = screen.push(widgets::message_bar(*health, said.as_str()));
     }
