@@ -1,8 +1,10 @@
 //! A shared explanation of actual task routing and optional local alternatives.
 //! Assessment never downloads models, changes providers or overwrites task choices.
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::model_runtime::LocalRuntime;
 use super::task_model::{TASKS, Task};
 use super::{account_model, task_model};
 use crate::context::Context;
@@ -12,7 +14,7 @@ use crate::llama::{
     llama_server::LlamaServer,
     model_choice::{self, Fit},
 };
-use crate::llm::{Effort, LLAMA_CPP};
+use crate::llm::Effort;
 use crate::service_error::{ErrorKind, ServiceError};
 pub const EVALUATION_VERSION: u32 = 1;
 
@@ -38,6 +40,7 @@ pub struct Assessment {
 pub struct Row {
     pub task: &'static Task,
     pub provider: String,
+    pub runtime: Option<LocalRuntime>,
     pub current: String,
     pub suggested: Option<&'static str>,
     pub why: &'static str,
@@ -54,10 +57,23 @@ pub struct Overview {
     pub download_bytes: u64,
 }
 
+impl Overview {
+    fn local_models(&self) -> BTreeMap<LocalRuntime, BTreeSet<String>> {
+        let mut models: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for row in &self.rows {
+            if let Some(runtime) = row.runtime {
+                models.entry(runtime).or_default().insert(row.current.clone());
+            }
+        }
+        models
+    }
+}
+
 /// Only adapt an unsaved built-in default. Explicit task selections always win.
 pub fn resolved(task: &Task, provider: &str, base: &str, saved: &str, server: Option<&LlamaServer>) -> String {
     let mut selected = task_model::model_for(task, provider, base, saved);
-    if provider == LLAMA_CPP
+    let runtime = LocalRuntime::for_provider(provider);
+    if runtime.is_some()
         && saved.is_empty()
         && let (Some(server), Some(model)) = (server, catalog::find(&selected))
         && model_choice::fit(
@@ -69,7 +85,7 @@ pub fn resolved(task: &Task, provider: &str, base: &str, saved: &str, server: Op
         selected = base.to_string();
     }
     if selected.is_empty() {
-        if provider == LLAMA_CPP {
+        if let Some(LocalRuntime::LlamaCpp) = runtime {
             return server
                 .and_then(|s| {
                     s.overview()
@@ -124,6 +140,7 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
             .map(|(_, value)| value.as_str())
             .unwrap_or("");
         let provider = key.map(|k| k.provider.as_str()).unwrap_or("");
+        let runtime = LocalRuntime::for_provider(provider);
         let current = key
             .map(|k| resolved(task, provider, &k.model, saved, context.llama.as_ref()))
             .unwrap_or_default();
@@ -154,7 +171,7 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
                     .find(|c| c.task == task.name && c.model == current)
                     .cloned()
             });
-        if provider.is_empty() || provider == LLAMA_CPP {
+        if provider.is_empty() || runtime.is_some() {
             let target = if provider.is_empty() {
                 suggested.unwrap_or("")
             } else {
@@ -167,6 +184,7 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
         rows.push(Row {
             task,
             provider: provider.to_string(),
+            runtime,
             current,
             suggested,
             why,
@@ -229,10 +247,6 @@ pub async fn evaluate_again(context: &Context) -> Result<String, ServiceError> {
 /// assignments first makes interrupted downloads recoverable without choosing everything again.
 pub async fn save_choices(context: &Context, chosen: &[(String, String)]) -> Result<(), ServiceError> {
     let plan = overview(context).await?;
-    let server = context
-        .llama
-        .as_ref()
-        .ok_or_else(|| ServiceError::new(ErrorKind::NotFound, "Local model setup is unavailable."))?;
     let mut choices = Vec::new();
     for (name, file) in chosen {
         let row = plan
@@ -240,32 +254,20 @@ pub async fn save_choices(context: &Context, chosen: &[(String, String)]) -> Res
             .iter()
             .find(|r| r.task.name == name)
             .ok_or_else(|| ServiceError::new(ErrorKind::Invalid, "Unknown model task."))?;
-        if !plan.fresh && row.provider != LLAMA_CPP {
-            return Err(ServiceError::new(
-                ErrorKind::Invalid,
-                "This task uses another provider. Change its provider in Language models first.",
-            ));
-        }
+        let runtime = if plan.fresh {
+            LocalRuntime::LlamaCpp
+        } else {
+            row.runtime.ok_or_else(|| {
+                ServiceError::new(
+                    ErrorKind::Invalid,
+                    "This task uses another provider. Change its provider in Language models first.",
+                )
+            })?
+        };
         if choices.iter().any(|(task, _): &(&Task, String)| task.name == name) {
             return Err(ServiceError::new(ErrorKind::Invalid, "Choose one model per task."));
         }
-        let model = server
-            .models()
-            .into_iter()
-            .find(|m| m.name == *file)
-            .or_else(|| catalog::find(file).map(|m| m.as_gguf(&server.models_folder())))
-            .ok_or_else(|| {
-                ServiceError::new(
-                    ErrorKind::Invalid,
-                    "Choose a model from the catalog or an existing model file.",
-                )
-            })?;
-        if model_choice::fit(&model, &server.inventory(), server.inventory().gpu.is_some()) == Fit::TooBig {
-            return Err(ServiceError::new(
-                ErrorKind::Invalid,
-                format!("{file} does not fit the detected memory."),
-            ));
-        }
+        runtime.validate_choice(context, file)?;
         choices.push((row.task, file.clone()));
     }
     if choices.is_empty() || (plan.fresh && choices.len() != TASKS.len()) {
@@ -291,7 +293,7 @@ pub async fn save_choices(context: &Context, chosen: &[(String, String)]) -> Res
 
 /// Model selections automatically prepare their local files. Cloud-only choices need no download.
 pub async fn download_selected(context: Arc<Context>) -> Result<String, ServiceError> {
-    if !overview(&context).await?.rows.iter().any(|r| r.provider == LLAMA_CPP) {
+    if overview(&context).await?.local_models().is_empty() {
         return Ok("Model choices saved.".into());
     }
     let work = Arc::clone(&context.running);
@@ -319,81 +321,17 @@ pub async fn download_selected(context: Arc<Context>) -> Result<String, ServiceE
     })
 }
 
-/// Download the exact saved local assignments, once per shared model, with the runtime.
+/// Dispatch each set of assigned files to its runtime's preparation adapter.
 pub async fn prepare(context: Arc<Context>) -> Result<String, ServiceError> {
-    let server = context
-        .llama
-        .as_ref()
-        .ok_or_else(|| ServiceError::new(ErrorKind::NotFound, "Local model setup is unavailable."))?;
-    let _lock = server.fetching.lock().await;
-    let turn = server
-        .downloads
-        .begin_turn("Preparing task models")
-        .map_err(|e| ServiceError::new(ErrorKind::TooMany, e))?;
-    let result = prepare_inner(&context, server).await;
-    turn.end(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
-    result
-}
-
-async fn prepare_inner(context: &Context, server: &LlamaServer) -> Result<String, ServiceError> {
-    let plan = overview(context).await?;
-    let mut targets = std::collections::BTreeSet::new();
-    for row in &plan.rows {
-        if row.provider == LLAMA_CPP {
-            targets.insert(row.current.as_str());
-        }
-    }
-    if targets.is_empty() {
+    let models = overview(&context).await?.local_models();
+    if models.is_empty() {
         return Err(ServiceError::new(
             ErrorKind::Invalid,
             "No local tasks selected. Pick a local provider in Language models first.",
         ));
     }
-    for file in &targets {
-        let model = server
-            .models()
-            .into_iter()
-            .find(|m| m.name == *file)
-            .or_else(|| catalog::find(file).map(|m| m.as_gguf(&server.models_folder())))
-            .ok_or_else(|| {
-                ServiceError::new(
-                    ErrorKind::Invalid,
-                    format!(
-                        "{file} is missing and is not in the download catalog. Restore it or select another model."
-                    ),
-                )
-            })?;
-        if model_choice::fit(&model, &server.inventory(), server.inventory().gpu.is_some()) == Fit::TooBig {
-            return Err(ServiceError::new(
-                ErrorKind::Invalid,
-                format!(
-                    "{file} no longer fits the detected memory. Review the local alternatives before preparing models."
-                ),
-            ));
-        }
-    }
-    std::fs::create_dir_all(server.models_folder())
-        .map_err(|e| ServiceError::failed("models/folder", e.to_string()))?;
-    download::ensure_space(&server.models_folder(), plan.download_bytes)
-        .map_err(|e| ServiceError::failed("models/storage", e))?;
-    if server.server_path().is_none() {
-        download::download_server(server.folder(), &server.inventory(), &server.downloads)
-            .await
-            .map_err(|e| ServiceError::failed("models/runtime", e))?;
-    }
-    for file in targets {
-        if server.models().iter().any(|m| m.name == file) {
-            continue;
-        }
-        let model = catalog::find(file).ok_or_else(|| {
-            ServiceError::new(
-                ErrorKind::Invalid,
-                format!("{file} is not in the catalog. Restore it to the models folder or choose another model."),
-            )
-        })?;
-        download::download_model(model, &server.models_folder(), &server.downloads)
-            .await
-            .map_err(|e| ServiceError::failed("models/download", e))?;
+    for (runtime, files) in models {
+        runtime.prepare(&context, &files).await?;
     }
     Ok("Your selected local models are ready. You can run a local check below or continue setup.".to_string())
 }
@@ -406,19 +344,13 @@ pub async fn check(context: &Context, name: &str) -> Result<String, ServiceError
         .iter()
         .find(|r| r.task.name == name)
         .ok_or_else(|| ServiceError::new(ErrorKind::Invalid, "Unknown model task."))?;
-    if row.provider != LLAMA_CPP || !row.downloaded {
-        return Err(ServiceError::new(
+    let runtime = row.runtime.filter(|_| row.downloaded).ok_or_else(|| {
+        ServiceError::new(
             ErrorKind::Invalid,
             "Local checks require a downloaded model assigned to this task. No cloud call or download was made.",
-        ));
-    }
-    let key = account_model::KeyFor {
-        provider: LLAMA_CPP.to_string(),
-        model: row.current.clone(),
-        base_url: String::new(),
-        api_key: String::new(),
-        uses: Default::default(),
-    };
+        )
+    })?;
+    let key = runtime.key(&row.current);
     let (prompt, expected) = fixture(name);
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
@@ -530,6 +462,7 @@ fn fixture(task: &str) -> (&'static str, &'static str) {
 mod tests {
     use super::*;
     use crate::llama::hardware::{GIB, Gpu, GpuVendor};
+    use crate::llm::LLAMA_CPP;
 
     async fn test_context(folder: &std::path::Path) -> Context {
         let db = crate::db::open_in_memory().await.unwrap();
@@ -550,6 +483,48 @@ mod tests {
 
     fn selections(file: &str) -> Vec<(String, String)> {
         TASKS.iter().map(|task| (task.name.into(), file.into())).collect()
+    }
+
+    #[tokio::test]
+    async fn cloud_and_external_servers_never_enter_the_local_runtime_adapter() {
+        use crate::llm::{ANTHROPIC, LOCAL, OPENAI};
+        let folder = std::env::temp_dir().join("jobfinder-external-runtime-routing");
+        let mut context = test_context(&folder).await;
+        context.llama = None;
+        // Even names resembling catalog files belong to these providers, not our downloader.
+        for provider in [OPENAI, ANTHROPIC, LOCAL] {
+            account_model::save(
+                context.db(),
+                &context.key_vault,
+                provider,
+                catalog::QWEN3_4B,
+                "http://localhost:11434/v1",
+                "",
+            )
+            .await
+            .unwrap();
+        }
+        account_model::save_uses(
+            context.db(),
+            &account_model::UseChoices {
+                resume: Some(LOCAL.into()),
+                application: Some(ANTHROPIC.into()),
+                job_evaluation: Some(OPENAI.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let plan = overview(&context).await.unwrap();
+        assert!(plan.local_models().is_empty());
+        assert!(plan.rows.iter().all(|r| r.runtime.is_none()));
+        assert_eq!(plan.download_bytes, 0);
+        let before = account_model::saved(context.db()).await.unwrap();
+        let context = Arc::new(context);
+        assert_eq!(
+            download_selected(Arc::clone(&context)).await.unwrap(),
+            "Model choices saved."
+        );
+        assert_eq!(account_model::saved(context.db()).await.unwrap(), before);
     }
 
     #[tokio::test]

@@ -43,7 +43,7 @@ impl State {
         let baseline: BTreeMap<_, _> = plan
             .rows
             .iter()
-            .filter(|r| plan.fresh || r.provider == crate::llm::LLAMA_CPP)
+            .filter(|r| plan.fresh || r.runtime.is_some())
             .map(|r| {
                 (
                     r.task.name,
@@ -400,7 +400,7 @@ pub fn ready(state: &State) -> bool {
                         if r.provider.is_empty() {
                             r.task.use_ == crate::account::account_model::APPLICATION
                         } else {
-                            r.provider != crate::llm::LLAMA_CPP || (r.downloaded && v.server_found)
+                            r.runtime.is_none() || (r.downloaded && v.server_found)
                         }
                     })
                 })
@@ -456,7 +456,7 @@ fn plan_card<'a>(
             button(text("Providers and advanced choices").size(style::BODY_SIZE)).style(style::standard_button).on_press(Msg::ShowLanguageModels),
         ].spacing(8));
     for task in &plan.rows {
-        let local = plan.fresh || task.provider == crate::llm::LLAMA_CPP;
+        let local = plan.fresh || task.runtime.is_some();
         let mut card = column![text(task.task.label).font(style::semibold()).size(style::BODY_SIZE)].spacing(6);
         if local {
             let choices = model_choices(view, task);
@@ -575,7 +575,7 @@ fn plan_card<'a>(
         } else if plan
             .rows
             .iter()
-            .any(|r| r.provider == crate::llm::LLAMA_CPP && (!r.downloaded || !view.server_found))
+            .any(|r| r.runtime.is_some() && (!r.downloaded || !view.server_found))
         {
             body = body.push(
                 button(text("Retry model downloads").size(style::BODY_SIZE))
