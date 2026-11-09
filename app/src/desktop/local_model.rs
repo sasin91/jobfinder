@@ -33,7 +33,44 @@ pub struct State {
     polling: bool,
     busy: bool,
     choices: BTreeMap<&'static str, String>,
+    /// Persisted choices (or fresh recommendations) that the pending edits started from.
+    choice_baseline: BTreeMap<&'static str, String>,
     dirty: bool,
+}
+
+impl State {
+    fn reconcile_choices(&mut self, plan: &model_plan::Overview) {
+        let baseline: BTreeMap<_, _> = plan
+            .rows
+            .iter()
+            .filter(|r| plan.fresh || r.provider == crate::llm::LLAMA_CPP)
+            .map(|r| {
+                (
+                    r.task.name,
+                    if plan.fresh {
+                        r.suggested.unwrap_or("").to_string()
+                    } else {
+                        r.current.clone()
+                    },
+                )
+            })
+            .collect();
+        let mut choices = baseline.clone();
+        if self.dirty {
+            for (task, file) in &self.choices {
+                // Only carry genuine edits forward, and only for tasks still using local models.
+                // Unedited tasks follow any saved changes made in the advanced screen.
+                if self.choice_baseline.get(task) != Some(file)
+                    && let Some(choice) = choices.get_mut(task)
+                {
+                    choice.clone_from(file);
+                }
+            }
+        }
+        self.dirty = choices != baseline;
+        self.choices = choices;
+        self.choice_baseline = baseline;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,25 +127,10 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         }
         Msg::Loaded(view) => {
             let running = state.busy || view.as_ref().is_ok_and(|view| view.busy);
-            if !state.dirty
-                && let Ok(view) = &view
+            if let Ok(view) = &view
                 && let Some(plan) = &view.plan
             {
-                state.choices = plan
-                    .rows
-                    .iter()
-                    .filter(|r| plan.fresh || r.provider == crate::llm::LLAMA_CPP)
-                    .map(|r| {
-                        (
-                            r.task.name,
-                            if plan.fresh {
-                                r.suggested.unwrap_or("").to_string()
-                            } else {
-                                r.current.clone()
-                            },
-                        )
-                    })
-                    .collect();
+                state.reconcile_choices(plan);
             }
             state.view = Some(view);
             if running && !state.polling {
@@ -133,7 +155,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                 return Task::none();
             }
             state.choices.insert(task, choice.file);
-            state.dirty = true;
+            state.dirty = state.choices != state.choice_baseline;
         }
         Msg::SaveChoices => {
             state.busy = true;
@@ -711,4 +733,173 @@ fn model_row(model: &CatalogRow, action: ModelAction, busy: bool) -> Element<'_,
     .align_y(Center)
     .padding(ROW_PADDING)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::{account_model, key_vault::KeyVault, task_model};
+    use crate::context::Context;
+    use crate::llama::{
+        catalog,
+        hardware::{GIB, Inventory},
+        llama_server::LlamaServer,
+    };
+    use crate::llm::{LLAMA_CPP, OPENAI};
+    use std::sync::LazyLock;
+
+    async fn runner() -> Runner {
+        static TAXONOMY: LazyLock<Arc<crate::taxonomy::Taxonomy>> =
+            LazyLock::new(|| Arc::new(crate::taxonomy::Taxonomy::load()));
+        let mut context = Context::new(
+            crate::db::open_in_memory().await.unwrap(),
+            Arc::clone(&TAXONOMY),
+            KeyVault::with_key_in_memory(),
+        );
+        context.llama = Some(LlamaServer::new(
+            &std::env::temp_dir().join("jobfinder-routing-reconciliation"),
+            Inventory {
+                memory_bytes: 16 * GIB,
+                gpu: None,
+            },
+        ));
+        Runner {
+            context: Arc::new(context),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    async fn reload(state: &mut State, runner: &Runner) {
+        let view = llama_setup_service::llama_setup_view(&runner.context).await.unwrap();
+        let _ = update(state, Msg::Loaded(Ok(Arc::new(view))), runner);
+    }
+
+    fn pick(state: &mut State, runner: &Runner, task: &'static str, file: &str) {
+        let _ = update(
+            state,
+            Msg::PickTask(
+                task,
+                ModelChoice {
+                    file: file.into(),
+                    label: file.into(),
+                },
+            ),
+            runner,
+        );
+    }
+
+    fn chosen(state: &State) -> Vec<(String, String)> {
+        state
+            .choices
+            .iter()
+            .map(|(task, file)| (task.to_string(), file.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn switching_to_cloud_after_unsaved_first_run_edits_unblocks_setup() {
+        let runner = runner().await;
+        let mut state = State::default();
+        reload(&mut state, &runner).await;
+        pick(&mut state, &runner, "read_cv", catalog::GRANITE_4_1_3B);
+        assert!(state.dirty);
+        assert!(!ready(&state));
+        // Reverting a selector should also stop blocking Continue on an otherwise ready plan.
+        pick(&mut state, &runner, "read_cv", catalog::QWEN3_4B);
+        assert!(!state.dirty);
+        pick(&mut state, &runner, "read_cv", catalog::GRANITE_4_1_3B);
+        account_model::save(
+            runner.context.db(),
+            &runner.context.key_vault,
+            OPENAI,
+            "cloud-model",
+            "",
+            "sk-test",
+        )
+        .await
+        .unwrap();
+        reload(&mut state, &runner).await;
+        assert!(state.choices.is_empty());
+        assert!(!state.dirty);
+        assert!(
+            ready(&state),
+            "Returning from cloud setup must enable Continue without restarting"
+        );
+        assert!(
+            model_plan::overview(&runner.context)
+                .await
+                .unwrap()
+                .rows
+                .iter()
+                .all(|r| r.provider == OPENAI && r.current == "cloud-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_routing_keeps_applicable_edits_and_refreshes_unedited_saved_choices() {
+        let runner = runner().await;
+        let context = &runner.context;
+        let all = task_model::TASKS
+            .iter()
+            .map(|t| (t.name.into(), catalog::QWEN3_4B.into()))
+            .collect::<Vec<_>>();
+        model_plan::save_choices(context, &all).await.unwrap();
+        let mut state = State::default();
+        reload(&mut state, &runner).await;
+        pick(&mut state, &runner, "read_job", catalog::GRANITE_4_1_3B);
+        pick(&mut state, &runner, "application_form", "Qwen3-1.7B-Q8_0.gguf");
+        account_model::save(context.db(), &context.key_vault, OPENAI, "cloud-model", "", "sk-test")
+            .await
+            .unwrap();
+        account_model::save_uses(
+            context.db(),
+            &account_model::UseChoices {
+                resume: Some(LLAMA_CPP.into()),
+                application: Some(OPENAI.into()),
+                job_evaluation: Some(LLAMA_CPP.into()),
+            },
+        )
+        .await
+        .unwrap();
+        task_model::save(context.db(), &[(&task_model::READ_CV, catalog::GRANITE_4_1_3B.into())])
+            .await
+            .unwrap();
+        reload(&mut state, &runner).await;
+        assert_eq!(state.choices.len(), 4);
+        assert!(!state.choices.contains_key("application_form"));
+        assert_eq!(
+            state.choices["read_job"],
+            catalog::GRANITE_4_1_3B,
+            "Keep the pending local edit"
+        );
+        assert_eq!(
+            state.choices["read_cv"],
+            catalog::GRANITE_4_1_3B,
+            "Unedited selectors follow advanced changes"
+        );
+        assert!(state.dirty);
+        model_plan::save_choices(context, &chosen(&state)).await.unwrap();
+        // Reloading an externally saved draft also clears dirty state.
+        reload(&mut state, &runner).await;
+        assert!(!state.dirty);
+        let plan = model_plan::overview(context).await.unwrap();
+        assert!(
+            plan.rows
+                .iter()
+                .filter(|r| r.task.use_ == account_model::APPLICATION)
+                .all(|r| r.provider == OPENAI && r.current == "cloud-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_reload_errors_do_not_discard_pending_local_edits() {
+        let runner = runner().await;
+        let mut state = State::default();
+        reload(&mut state, &runner).await;
+        pick(&mut state, &runner, "read_cv", catalog::GRANITE_4_1_3B);
+        let _ = update(&mut state, Msg::Loaded(Err("Temporary database error".into())), &runner);
+        reload(&mut state, &runner).await;
+        assert_eq!(state.choices["read_cv"], catalog::GRANITE_4_1_3B);
+        assert!(state.dirty);
+    }
 }
