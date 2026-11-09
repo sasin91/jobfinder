@@ -173,7 +173,15 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
             check,
         });
     }
-    let download_bytes = downloads.iter().filter_map(|f| catalog::find(f)).map(|m| m.bytes).sum();
+    let download_bytes = downloads
+        .iter()
+        .filter_map(|f| catalog::find(f))
+        .map(|m| {
+            context.llama.as_ref().map_or(m.bytes, |server| {
+                download::remaining_bytes(&m.url(), &server.models_folder().join(m.file), m.bytes)
+            })
+        })
+        .sum();
     Ok(Overview {
         rows,
         assessment,
@@ -399,13 +407,12 @@ pub async fn check(context: &Context, name: &str) -> Result<String, ServiceError
             "Loading and answering exceeded two minutes. Try a smaller model or inspect the runtime log.".to_string(),
         ),
     };
-    let mut assessment = plan.assessment.unwrap_or(Assessment {
-        version: EVALUATION_VERSION,
-        at: chrono::Utc::now().timestamp(),
-        inventory: context.llama.as_ref().unwrap().inventory(),
-        runtime_release: runtime_release(context),
-        checks: Vec::new(),
-    });
+    let mut assessment = assessment_for_check(
+        plan.assessment,
+        context.llama.as_ref().unwrap().inventory(),
+        runtime_release(context),
+        chrono::Utc::now().timestamp(),
+    );
     assessment.checks.retain(|c| c.task != name);
     assessment.checks.push(Check {
         task: name.to_string(),
@@ -428,6 +435,23 @@ pub async fn check(context: &Context, name: &str) -> Result<String, ServiceError
         if passed { "passed" } else { "needs attention" },
         started.elapsed().as_secs_f64()
     ))
+}
+
+fn assessment_for_check(
+    previous: Option<Assessment>,
+    inventory: Inventory,
+    runtime_release: String,
+    at: i64,
+) -> Assessment {
+    previous
+        .filter(|a| a.version == EVALUATION_VERSION && a.runtime_release == runtime_release)
+        .unwrap_or(Assessment {
+            version: EVALUATION_VERSION,
+            at,
+            inventory,
+            runtime_release,
+            checks: Vec::new(),
+        })
 }
 
 fn runtime_release(context: &Context) -> String {
@@ -471,6 +495,117 @@ fn fixture(task: &str) -> (&'static str, &'static str) {
 mod tests {
     use super::*;
     use crate::llama::hardware::{GIB, Gpu, GpuVendor};
+
+    async fn test_context(folder: &std::path::Path) -> Context {
+        let db = crate::db::open_in_memory().await.unwrap();
+        let mut context = Context::new(
+            db,
+            Arc::new(crate::taxonomy::Taxonomy::load()),
+            crate::account::key_vault::KeyVault::with_key_in_memory(),
+        );
+        context.llama = Some(LlamaServer::new(
+            folder,
+            Inventory {
+                memory_bytes: 16 * GIB,
+                gpu: None,
+            },
+        ));
+        context
+    }
+
+    #[tokio::test]
+    async fn overview_credits_partial_files_once_per_shared_model() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-plan-resume-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        let models = context.llama.as_ref().unwrap().models_folder();
+        std::fs::create_dir_all(&models).unwrap();
+        let before = overview(&context).await.unwrap().download_bytes;
+        for file in [catalog::QWEN3_4B, catalog::GRANITE_4_1_3B] {
+            let model = catalog::find(file).unwrap();
+            let part = models.join(format!("{file}.part"));
+            std::fs::write(&part, [0u8; 128]).unwrap();
+            std::fs::write(
+                part.with_extension("resume.json"),
+                serde_json::to_vec(&json!({"url":model.url(),"version":"\"v1\""})).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(overview(&context).await.unwrap().download_bytes, before - 256);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn checks_after_runtime_or_evaluation_changes_are_visible_after_reload() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-assessment-reset-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        let server = context.llama.as_ref().unwrap();
+        std::fs::create_dir_all(server.models_folder()).unwrap();
+        std::fs::write(folder.join("runtime-release.txt"), "new-runtime").unwrap();
+        let model = "candidate.gguf";
+        std::fs::write(server.models_folder().join(model), b"GGUF").unwrap();
+        account_model::save(context.db(), &context.key_vault, LLAMA_CPP, model, "", "")
+            .await
+            .unwrap();
+        let check = Check {
+            task: "application".into(),
+            model: model.into(),
+            at: 10,
+            milliseconds: 50,
+            passed: true,
+            detail: "passed".into(),
+        };
+        for (version, release) in [
+            (EVALUATION_VERSION, "old-runtime"),
+            (EVALUATION_VERSION + 1, "new-runtime"),
+        ] {
+            let prior = Assessment {
+                version,
+                at: 1,
+                inventory: Inventory::default(),
+                runtime_release: release.into(),
+                checks: vec![check.clone()],
+            };
+            save(&context, &prior).await.unwrap();
+            let loaded = overview(&context).await.unwrap();
+            assert!(
+                loaded
+                    .rows
+                    .iter()
+                    .find(|r| r.task.name == "application")
+                    .unwrap()
+                    .check
+                    .is_none()
+            );
+            let mut refreshed =
+                assessment_for_check(loaded.assessment, server.inventory(), runtime_release(&context), 10);
+            assert!(
+                refreshed.checks.is_empty(),
+                "old measurements must not be relabelled as current"
+            );
+            assert_eq!(refreshed.inventory, server.inventory());
+            refreshed.checks.push(check.clone());
+            save(&context, &refreshed).await.unwrap();
+            let reloaded = overview(&context).await.unwrap();
+            assert!(
+                reloaded
+                    .rows
+                    .iter()
+                    .find(|r| r.task.name == "application")
+                    .unwrap()
+                    .check
+                    .as_ref()
+                    .unwrap()
+                    .passed
+            );
+            let current = assessment_for_check(reloaded.assessment, server.inventory(), runtime_release(&context), 20);
+            assert_eq!(
+                current.checks.len(),
+                1,
+                "preserve other checks when metadata already matches"
+            );
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
     #[test]
     fn recommendations_are_task_specific_and_fit_small_hardware() {
         let inventory = Inventory {

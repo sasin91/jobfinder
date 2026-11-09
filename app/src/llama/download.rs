@@ -496,17 +496,7 @@ pub(crate) async fn download_file(
     }
     let part = part_path(to);
     let metadata = part.with_extension("resume.json");
-    let prior = std::fs::read(&metadata)
-        .ok()
-        .and_then(|v| serde_json::from_slice::<Resume>(&v).ok())
-        .filter(|r| r.url == url);
-    let mut done = std::fs::metadata(&part).map_or(0, |m| m.len());
-    let mut version = prior
-        .as_ref()
-        .and_then(|r| reqwest::header::HeaderValue::from_str(&r.version).ok());
-    if version.is_none() {
-        done = 0;
-    }
+    let (mut done, mut version) = resume_from(url, to);
     let mut answer = get_from(client, url, done, version.as_ref()).await?;
     if answer.is_none() {
         done = 0;
@@ -611,6 +601,28 @@ pub(crate) async fn download_file(
 struct Resume {
     url: String,
     version: String,
+}
+
+/// Use the same recovery eligibility for the plan's storage estimate and the request.
+fn resume_from(url: &str, to: &Path) -> (u64, Option<reqwest::header::HeaderValue>) {
+    let part = part_path(to);
+    let version = std::fs::read(part.with_extension("resume.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Resume>(&bytes).ok())
+        .filter(|r| r.url == url && !r.version.is_empty() && !r.version.starts_with("W/"))
+        .and_then(|r| reqwest::header::HeaderValue::from_str(&r.version).ok());
+    let done = if version.is_some() {
+        std::fs::metadata(part).map_or(0, |m| m.len())
+    } else {
+        0
+    };
+    (done, version)
+}
+
+/// A remote version change can still require a full transfer. download_file checks the
+/// actual response's remaining size before writing, even after this optimistic estimate.
+pub(crate) fn remaining_bytes(url: &str, to: &Path, full_bytes: u64) -> u64 {
+    full_bytes.saturating_sub(resume_from(url, to).0)
 }
 
 fn write_resume(path: &Path, url: &str, version: Option<&reqwest::header::HeaderValue>) -> Result<(), String> {
@@ -929,11 +941,47 @@ mod tests {
                 Some(&reqwest::header::HeaderValue::from_static("\"v1\"")),
             )
             .unwrap();
+            assert_eq!(
+                remaining_bytes(&url, &to, 8),
+                4,
+                "credit the same prefix the request resumes"
+            );
             download_file(&client, &url, &to, &Downloads::default()).await.unwrap();
             assert_eq!(std::fs::read_to_string(&to).unwrap(), expected);
             assert!(!part.exists());
         }
         task.abort();
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn partial_credit_requires_matching_usable_recovery_metadata() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-partial-credit-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let to = folder.join("model.gguf");
+        let part = part_path(&to);
+        let metadata = part.with_extension("resume.json");
+        let url = "https://example.com/model.gguf";
+        std::fs::write(&part, "GGUF").unwrap();
+        assert_eq!(remaining_bytes(url, &to, 8), 8);
+        for value in [
+            r#"{"url":"https://example.com/other.gguf","version":"\"v1\""}"#,
+            r#"{"url":"https://example.com/model.gguf","version":""}"#,
+            r#"{"url":"https://example.com/model.gguf","version":"W/\"v1\""}"#,
+            "broken json",
+        ] {
+            std::fs::write(&metadata, value).unwrap();
+            assert_eq!(remaining_bytes(url, &to, 8), 8);
+        }
+        write_resume(
+            &metadata,
+            url,
+            Some(&reqwest::header::HeaderValue::from_static("\"v1\"")),
+        )
+        .unwrap();
+        assert_eq!(remaining_bytes(url, &to, 8), 4);
+        std::fs::remove_file(part).unwrap();
+        assert_eq!(remaining_bytes(url, &to, 8), 8);
         std::fs::remove_dir_all(folder).unwrap();
     }
 

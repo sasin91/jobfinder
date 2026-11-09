@@ -293,7 +293,7 @@ fn plan_card(plan: &model_plan::Overview, busy: bool) -> Element<'_, Msg> {
             button(text("Evaluate again").size(style::BODY_SIZE)).style(style::primary_button).on_press_maybe((!busy).then_some(Msg::Evaluate)),
             button(text("Providers and advanced choices").size(style::BODY_SIZE)).style(style::standard_button).on_press(Msg::ShowLanguageModels),
         ].spacing(8));
-    body = body.push(widgets::caption(format!("Missing catalog models in the local plan: {} total, shared models counted once. Runtime and temporary extraction space are additional. Existing providers and manual task choices are preserved.", crate::llama::hardware::gigabytes(plan.download_bytes))))
+    body = body.push(widgets::caption(format!("Remaining catalog downloads in the local plan: {} total, shared models counted once. Resumable partial files are credited; changed remote files may need restarting. Runtime and temporary extraction space are additional. Existing providers and manual task choices are preserved.", crate::llama::hardware::gigabytes(plan.download_bytes))))
         .push(button(text("Download and prepare local plan").size(style::BODY_SIZE)).style(style::primary_button).on_press_maybe((!busy).then_some(Msg::Prepare)));
     for task in &plan.rows {
         let current = if task.provider.is_empty() {
