@@ -86,6 +86,7 @@ pub struct State {
     search_form: SearchForm,
     search_dirty: bool,
     search_errors: Vec<String>,
+    search_profile_open: bool,
     scanning: bool,
     stage: usize,
     stage_loaded: bool,
@@ -102,8 +103,8 @@ pub enum Msg {
     SearchRemote(bool),
     SearchSite(&'static str, bool),
     SearchThreshold(String),
-    SaveSearch,
-    SearchSaved(Result<String, Vec<String>>),
+    ToggleSearchProfile,
+    SearchSaved(usize, Result<String, Vec<String>>),
     SignIn,
     FirstScan,
     ScanDone(Result<String, String>),
@@ -191,7 +192,37 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             state.search_dirty = true;
         }
         Msg::Stage(stage) => {
-            state.stage = stage.min(5);
+            if state.busy {
+                return Task::none();
+            }
+            if state.stage == 3
+                && stage > 3
+                && let Some(Ok(steps)) = &state.steps
+                && (steps.search.id == 0 || state.search_dirty || state.search_form.active != "1")
+            {
+                let id = steps.search.id;
+                let mut form = state.search_form.clone();
+                form.active = "1".into();
+                state.busy = true;
+                state.search_errors.clear();
+                return runner.run(
+                    move |context| async move {
+                        search_service::save(&context, id, &form)
+                            .await
+                            .map(|(_, said)| said.to_string())
+                            .map_err(|e| match e {
+                                SaveError::Invalid(why) => why,
+                                SaveError::Failed(e) => vec![e.message],
+                            })
+                    },
+                    move |answer| Msg::SearchSaved(stage, answer.unwrap_or_else(|e| Err(vec![e]))),
+                );
+            }
+            let next_stage = stage.min(5);
+            if state.stage != next_stage {
+                state.search_profile_open = false;
+            }
+            state.stage = next_stage;
             return runner.run(
                 move |context| async move { setup_steps::visit(&context, stage).await },
                 |r| Msg::StageRecorded(r.and_then(|s| s.map_err(|e| e.message))),
@@ -211,6 +242,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             state.search_form.tailor_from_score = value;
             state.search_dirty = true;
         }
+        Msg::ToggleSearchProfile => state.search_profile_open = !state.search_profile_open,
         Msg::SearchRemote(value) => {
             state.search_form.remote_ok = if value { "1" } else { "" }.into();
             state.search_dirty = true;
@@ -229,41 +261,22 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             state.search_form.skipped_sites = skipped.join("\n");
             state.search_dirty = true;
         }
-        Msg::SaveSearch => {
-            let id = state
-                .steps
-                .as_ref()
-                .and_then(|s| s.as_ref().ok())
-                .map_or(0, |s| s.search.id);
-            let mut form = state.search_form.clone();
-            form.active = "1".into();
-            state.busy = true;
-            return runner.run(
-                move |context| async move {
-                    search_service::save(&context, id, &form)
-                        .await
-                        .map(|(_, said)| said.to_string())
-                        .map_err(|e| match e {
-                            SaveError::Invalid(why) => why,
-                            SaveError::Failed(e) => vec![e.message],
-                        })
-                },
-                |answer| Msg::SearchSaved(answer.unwrap_or_else(|e| Err(vec![e]))),
-            );
-        }
-        Msg::SearchSaved(result) => {
+        Msg::SearchSaved(stage, result) => {
             state.busy = false;
             match result {
                 Ok(said) => {
                     state.search_dirty = false;
                     state.search_errors.clear();
                     state.said = Some((Health::Ready, said));
-                    return Task::done(Msg::Load);
+                    // Wait for fresh search data before exposing the next step's controls.
+                    state.steps = None;
+                    return update(state, Msg::Stage(stage), runner).chain(Task::done(Msg::Load));
                 }
                 Err(errors) => state.search_errors = errors,
             }
         }
         Msg::SignIn => {
+            state.busy = true;
             return runner.run(
                 |context| async move { search_service::open_sign_in(&context).map(str::to_string) },
                 |r| Msg::Scheduled(r.and_then(|s| s.map_err(|e| e.message))),
@@ -474,7 +487,10 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             } else {
                 style::standard_button
             })
-            .on_press_maybe((!state.busy).then_some(Msg::Stage(index))),
+            .on_press_maybe(
+                (!state.busy && (index <= 3 || state.stage == 3 || !state.search_dirty))
+                    .then_some(Msg::Stage(index)),
+            ),
         );
     }
     let content = match state.stage {
@@ -510,7 +526,10 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             button(text("Continue").size(style::BODY_SIZE))
                 .padding([8.0, 16.0])
                 .style(style::primary_button)
-                .on_press_maybe((!state.busy && !state.search_dirty).then_some(Msg::Stage(state.stage + 1))),
+                .on_press_maybe(
+                    (!state.busy && (state.stage <= 3 || !state.search_dirty))
+                        .then_some(Msg::Stage(state.stage + 1)),
+                ),
         );
     } else {
         navigation = navigation.push(
@@ -525,42 +544,85 @@ pub fn view(state: &State) -> Element<'_, Msg> {
 
 fn search_step<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Element<'a, Msg> {
     let form = &state.search_form;
-    let mut body = column![
-        widgets::note("Name your search and describe the jobs you want. New posts are matched against the profile reviewed above."),
-        text_input("Search name, e.g. Backend roles", &form.name).on_input(Msg::SearchName).padding(8).style(style::text_field),
-        text_input("Keywords, e.g. Rust developer", &form.keywords).on_input(Msg::SearchKeywords).padding(8).style(style::text_field),
-        text_input("Location, e.g. Aarhus", &form.location).on_input(Msg::SearchLocation).padding(8).style(style::text_field),
-        checkbox(form.remote_ok == "1").label("Include remote jobs").on_toggle(Msg::SearchRemote).style(style::check_box),
-        widgets::caption("Select sources. Jobnet and Jobindex need no account. LinkedIn and Indeed use JobFinder's own browser and may require you to sign in or resolve a site challenge."),
-    ].spacing(10);
+    let input = |example, value, on_input: fn(String) -> Msg| {
+        text_input(example, value)
+            .on_input_maybe((!state.busy).then_some(on_input))
+            .padding(8)
+            .style(style::text_field)
+            .into()
+    };
+    let search = column![
+        widgets::section_title("Job search"),
+        widgets::field("Search name", input("e.g. Backend roles", &form.name, Msg::SearchName), None),
+        widgets::field(
+            "Job titles or keywords",
+            input("e.g. Rust developer, backend developer", &form.keywords, Msg::SearchKeywords),
+            Some("Separate multiple titles or keywords with commas."),
+        ),
+        widgets::field("Location", input("e.g. Aarhus or 8000", &form.location, Msg::SearchLocation), None),
+        checkbox(form.remote_ok == "1")
+            .label("Include remote jobs")
+            .on_toggle_maybe((!state.busy).then_some(Msg::SearchRemote))
+            .style(style::check_box),
+    ]
+    .spacing(10);
+
+    let mut sites = column![widgets::section_title("Job sites")].spacing(8);
     for (domain, label) in [
         ("jobnet.dk", "Jobnet — public search"),
         ("jobindex.dk", "Jobindex — public search"),
         ("linkedin.com", "LinkedIn — sign-in required"),
         ("indeed.com", "Indeed — sign-in may be required"),
     ] {
-        body = body.push(
+        sites = sites.push(
             checkbox(!form.skipped_sites.lines().any(|s| s == domain))
                 .label(label)
-                .on_toggle(move |on| Msg::SearchSite(domain, on))
+                .on_toggle_maybe((!state.busy).then_some(move |on| Msg::SearchSite(domain, on)))
                 .style(style::check_box),
         );
     }
-    body = body.push(button(text("Sign in to job sites").size(style::BODY_SIZE)).style(style::standard_button).on_press_maybe((!state.busy).then_some(Msg::SignIn)))
-        .push(widgets::caption("LinkedIn and Indeed restrict automated access; the scan pauses when they request sign-in or a person check. If OpenAI is selected for job evaluation, the scan also uses its web search."))
-        .push(widgets::caption("Automatically write applications and tailored résumés from this match score (0–100). Use 101 to leave document writing manual."))
-        .push(text_input("Document-writing threshold", &form.tailor_from_score).on_input(Msg::SearchThreshold).padding(8).style(style::text_field))
-        .push(button(text(if step.id == 0 { "Save my first search" } else { "Save search and sources" }).size(style::BODY_SIZE)).style(style::primary_button).on_press_maybe((!state.busy).then_some(Msg::SaveSearch)));
-    if let Some(profile) = &step.profile_text {
-        body = body.push(widgets::section_title("Profile used for matching"))
-            .push(widgets::caption(profile.clone()))
-            .push(widgets::caption("Review these extracted facts. To correct them, edit your CV text above and import it again with Replace my profile selected."));
-    }
+    sites = sites
+        .push(
+            button(text("Sign in to job sites").size(style::BODY_SIZE))
+                .style(style::standard_button)
+                .on_press_maybe((!state.busy).then_some(Msg::SignIn)),
+        )
+        .push(widgets::caption("The scan pauses if LinkedIn or Indeed asks you to sign in or verify that you're human. If OpenAI is selected for job evaluation, the scan also uses its web search."));
     for status in &step.source_status {
-        body = body.push(widgets::caption(status.clone()));
+        sites = sites.push(widgets::caption(status.as_str()));
     }
-    for error in &state.search_errors {
-        body = body.push(widgets::errors_line(error.clone()));
+
+    let mut body = column![
+        search,
+        widgets::divider(),
+        sites,
+        widgets::divider(),
+        widgets::field(
+            "Minimum match score for automatic writing",
+            input("0–101", &form.tailor_from_score, Msg::SearchThreshold),
+            Some("Matches at or above this score (0–100) get a tailored résumé and application. Enter 101 to write them manually."),
+        ),
+    ]
+    .spacing(14);
+    if let Some(profile) = &step.profile_text {
+        let toggle_label = if state.search_profile_open {
+            "▾ Profile used for matching"
+        } else {
+            "▸ Profile used for matching"
+        };
+        body = body.push(widgets::divider()).push(
+            button(text(toggle_label).size(style::BODY_SIZE))
+                .style(style::standard_button)
+                .on_press(Msg::ToggleSearchProfile),
+        );
+        if state.search_profile_open {
+            body = body
+                .push(widgets::caption("To correct your profile, go to step 3 (Your CV) and import your updated CV with the replacement option selected."))
+                .push(widgets::caption(profile.as_str()));
+        }
+    }
+    if !state.search_errors.is_empty() {
+        body = body.push(widgets::errors(&state.search_errors));
     }
     body.into()
 }
