@@ -1,6 +1,6 @@
 [package]
 name = "jobfinder"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "JobFinder: Recruiter's CV match as a local desktop app"
 license = "BSD-2-Clause"

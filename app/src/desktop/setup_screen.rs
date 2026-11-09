@@ -499,9 +499,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
                 style::standard_button
             })
             .on_press_maybe(
-                (!state.busy
-                    && (index <= 1 || done[1])
-                    && (index <= 3 || state.stage == 3 || !state.search_dirty))
+                (!state.busy && (index <= 1 || done[1]) && (index <= 3 || state.stage == 3 || !state.search_dirty))
                     .then_some(Msg::Stage(index)),
             ),
         );
@@ -540,9 +538,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
                 .padding([8.0, 16.0])
                 .style(style::primary_button)
                 .on_press_maybe(
-                    (!state.busy
-                        && (state.stage != 1 || done[1])
-                        && (state.stage <= 3 || !state.search_dirty))
+                    (!state.busy && (state.stage != 1 || done[1]) && (state.stage <= 3 || !state.search_dirty))
                         .then_some(Msg::Stage(state.stage + 1)),
                 ),
         );
@@ -568,13 +564,25 @@ fn search_step<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Eleme
     };
     let search = column![
         widgets::section_title("Job search"),
-        widgets::field("Search name", input("e.g. Backend roles", &form.name, Msg::SearchName), None),
+        widgets::field(
+            "Search name",
+            input("e.g. Backend roles", &form.name, Msg::SearchName),
+            None
+        ),
         widgets::field(
             "Job titles or keywords",
-            input("e.g. Rust developer, backend developer", &form.keywords, Msg::SearchKeywords),
+            input(
+                "e.g. Rust developer, backend developer",
+                &form.keywords,
+                Msg::SearchKeywords
+            ),
             Some("Separate multiple titles or keywords with commas."),
         ),
-        widgets::field("Location", input("e.g. Aarhus or 8000", &form.location, Msg::SearchLocation), None),
+        widgets::field(
+            "Location",
+            input("e.g. Aarhus or 8000", &form.location, Msg::SearchLocation),
+            None
+        ),
         checkbox(form.remote_ok == "1")
             .label("Include remote jobs")
             .on_toggle_maybe((!state.busy).then_some(Msg::SearchRemote))

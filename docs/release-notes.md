@@ -1,14 +1,11 @@
 JobFinder checks the job sites for you while your PC is on, matches each post with your CV, and starts the application. Free and open source (BSD 2-Clause).
 
-## New in 0.1.1
+## New in 0.1.2
 
-- **Application autofill.** Search your shortlist from the browser extension and fill supported embedded forms, including CV and application upload widgets. Review the filled fields and attachments before submitting. Reload the unpacked extension after updating JobFinder.
-- **Form-answer model.** Pick a model for application questions in Language models. The built-in local provider defaults to Qwen3 4B. You can also select a downloaded GGUF such as IBM Granite 4.1 3B.
-- **Match review.** Scoped experience requirements and unconfirmed commute locations are handled more carefully. Saved matches can be sorted by date, and irrelevant matches have their own rejection reason.
-- **Recordings.** Transcribe calls and notes on your computer with Whisper.
-- **Game mode.** See when a game is using the GPU and control game mode manually.
-- **Years of work.** Letters and résumés no longer guess how long you have worked. The count comes from the dates of the jobs in your profile, and you can correct it on the Setup screen. The match without an AI model uses the same number.
-- If you ran 0.1.0, start the new file the same way: your database is updated the first time it opens.
+- **Resumable setup.** Review your models, import your CV, set up your first job search, and try a short scan before choosing a schedule. JobFinder saves your place and keeps your existing models, profile, searches, and matches when you upgrade.
+- **Models by task.** See recommendations and choose which model handles each task directly in Setup. JobFinder automatically downloads selected local models, shares downloads across tasks, and can run a local check on a downloaded model.
+- **Model download recovery.** See download progress and resume interrupted downloads when the source supports it. JobFinder checks available disk space before downloading.
+- **Job searches.** Set your location and remote preference, choose job sites individually, and save the search by continuing to the next step. Signed-in sites and automatic application drafting start disabled for new searches created in setup.
 
 ## Download
 
@@ -23,12 +20,7 @@ JobFinder checks the job sites for you while your PC is on, matches each post wi
 
 ## The first start
 
-JobFinder opens on **Set up JobFinder**:
-
-1. Your data: a new database in `%APPDATA%\JobFinder` (`~/.local/share/JobFinder` on Linux).
-2. An AI model: the app's own local model when your graphics card has room for a good one, otherwise an OpenAI or Claude API key.
-3. Your CV, which the model reads into your profile.
-4. How often the job scan runs by itself.
+JobFinder opens on **Set up JobFinder**. It shows where your data lives, then guides you through model selection, CV import, and your first job search. You can try or skip the first scan, then choose automatic checks or manual scanning before finishing.
 
 The Jobnet extension for Edge or Chrome is under Settings, Jobnet extension.
 
