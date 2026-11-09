@@ -400,7 +400,7 @@ pub fn ready(state: &State) -> bool {
                         if r.provider.is_empty() {
                             r.task.use_ == crate::account::account_model::APPLICATION
                         } else {
-                            r.runtime.is_none() || (r.downloaded && v.server_found)
+                            r.runtime.is_none() || (r.downloaded && r.runtime_available)
                         }
                     })
                 })
@@ -520,7 +520,7 @@ fn plan_card<'a>(
                     button(text("Run local check").size(style::BODY_SIZE))
                         .style(style::standard_button)
                         .on_press_maybe(
-                            (!busy && !state.dirty && task.downloaded && view.server_found)
+                            (!busy && !state.dirty && task.downloaded && task.runtime_available)
                                 .then_some(Msg::CheckTask(task.task.name)),
                         ),
                 );
@@ -575,7 +575,7 @@ fn plan_card<'a>(
         } else if plan
             .rows
             .iter()
-            .any(|r| r.runtime.is_some() && (!r.downloaded || !view.server_found))
+            .any(|r| r.runtime.is_some() && (!r.downloaded || !r.runtime_available))
         {
             body = body.push(
                 button(text("Retry model downloads").size(style::BODY_SIZE))

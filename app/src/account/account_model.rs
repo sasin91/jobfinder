@@ -265,12 +265,12 @@ pub async fn save(
 pub async fn save_local_choices(
     db: &SqlitePool,
     vault: &KeyVault,
+    provider: &str,
     base: &str,
     choices: &[(&'static task_model::Task, String)],
 ) -> Result<(), Error> {
     let _together = vault.lock().await;
     let mut tx = crate::db::write_transaction(db).await?;
-    let provider = LLAMA_CPP;
     let empty = "";
     let now = chrono::Utc::now().timestamp();
     sqlx::query_file!("queries/account_model/save.sql", provider, base, empty, empty, now)

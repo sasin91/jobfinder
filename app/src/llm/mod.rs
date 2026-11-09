@@ -112,7 +112,7 @@ impl Llm {
             LOCAL => Adapter::Openai(Openai::local(api_key, model, base_url)?),
             LLAMA_CPP => {
                 return Err(LlmException::new(
-                    "The app's own model runs through its llama-server; start it with llama::use_key.",
+                    "The app's own model runs through its llama-server; start it with model_runtime::load_key.",
                 ));
             }
             _ => return Err(LlmException::new(format!("Unknown LLM provider \"{provider}\"."))),

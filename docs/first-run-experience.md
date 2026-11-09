@@ -240,6 +240,13 @@ Advanced provider/task changes also prepare their selected local assignments
 automatically. First-run provider routing and all six task choices commit in one
 transaction before downloads begin.
 
+Bundled runtime integrations implement the `ModelRuntime` trait in separate files
+under `account/model_runtime/`. The registry supplies trait objects; the planner
+uses their model resolution, recommendations, availability, size estimates,
+validation, preparation and loading operations. `llama_cpp.rs` owns the current
+implementation. Adding a managed runtime requires an implementation and registry
+entry rather than a new enum variant or runtime branches in the planner.
+
 Linux runtime asset selection supports x86_64 and aarch64 CPU/Vulkan archives and
 compatible available CUDA 12.8 archives. Installation preserves executable modes
 and relative shared-library links. Native DRM and NVIDIA/WSL inventory are

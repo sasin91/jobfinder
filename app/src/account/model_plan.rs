@@ -4,16 +4,11 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::model_runtime::LocalRuntime;
+use super::model_runtime::{self, ModelRuntime};
 use super::task_model::{TASKS, Task};
 use super::{account_model, task_model};
 use crate::context::Context;
-use crate::llama::{
-    self, catalog, download,
-    hardware::Inventory,
-    llama_server::LlamaServer,
-    model_choice::{self, Fit},
-};
+use crate::llama::hardware::Inventory;
 use crate::llm::Effort;
 use crate::service_error::{ErrorKind, ServiceError};
 pub const EVALUATION_VERSION: u32 = 1;
@@ -40,7 +35,8 @@ pub struct Assessment {
 pub struct Row {
     pub task: &'static Task,
     pub provider: String,
-    pub runtime: Option<LocalRuntime>,
+    pub runtime: Option<&'static dyn ModelRuntime>,
+    pub runtime_available: bool,
     pub current: String,
     pub suggested: Option<&'static str>,
     pub why: &'static str,
@@ -57,71 +53,47 @@ pub struct Overview {
     pub download_bytes: u64,
 }
 
+struct RuntimeModels {
+    runtime: &'static dyn ModelRuntime,
+    models: BTreeSet<String>,
+}
+
 impl Overview {
-    fn local_models(&self) -> BTreeMap<LocalRuntime, BTreeSet<String>> {
-        let mut models: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    fn local_models(&self) -> BTreeMap<&'static str, RuntimeModels> {
+        let mut models: BTreeMap<_, RuntimeModels> = BTreeMap::new();
         for row in &self.rows {
             if let Some(runtime) = row.runtime {
-                models.entry(runtime).or_default().insert(row.current.clone());
+                models
+                    .entry(runtime.provider())
+                    .or_insert_with(|| RuntimeModels {
+                        runtime,
+                        models: BTreeSet::new(),
+                    })
+                    .models
+                    .insert(row.current.clone());
             }
         }
         models
     }
-}
 
-/// Only adapt an unsaved built-in default. Explicit task selections always win.
-pub fn resolved(task: &Task, provider: &str, base: &str, saved: &str, server: Option<&LlamaServer>) -> String {
-    let mut selected = task_model::model_for(task, provider, base, saved);
-    let runtime = LocalRuntime::for_provider(provider);
-    if runtime.is_some()
-        && saved.is_empty()
-        && let (Some(server), Some(model)) = (server, catalog::find(&selected))
-        && model_choice::fit(
-            &model.as_gguf(&server.models_folder()),
-            &server.inventory(),
-            server.card_usable().unwrap_or(false),
-        ) == Fit::TooBig
-    {
-        selected = base.to_string();
-    }
-    if selected.is_empty() {
-        if let Some(LocalRuntime::LlamaCpp) = runtime {
-            return server
-                .and_then(|s| {
-                    s.overview()
-                        .chosen
-                        .ok()
-                        .or_else(|| recommendation(task, s).0.map(str::to_string))
-                })
-                .unwrap_or_default();
+    async fn prepare_models(&self, context: &Context) -> Result<(), ServiceError> {
+        for RuntimeModels { runtime, models } in self.local_models().into_values() {
+            runtime.prepare(context, &models).await?;
         }
-        return crate::llm::default_model(provider).unwrap_or("").to_string();
+        Ok(())
     }
-    selected
 }
 
-pub fn recommendation(task: &Task, server: &LlamaServer) -> (Option<&'static str>, &'static str) {
-    let inventory = server.inventory();
-    let fit = |file| {
-        catalog::find(file)
-            .map(|m| model_choice::fit(&m.as_gguf(&server.models_folder()), &inventory, inventory.gpu.is_some()))
-    };
-    let base = fit(catalog::QWEN3_4B)
-        .filter(|f| *f != Fit::TooBig)
-        .map(|_| catalog::QWEN3_4B);
-    match task.name {
-        "application_form" if fit(catalog::GRANITE_4_1_3B).is_some_and(|f| f != Fit::TooBig) => (
-            Some(catalog::GRANITE_4_1_3B),
-            "A compact model for short, structured form answers. It has worked well in previous use; broader quality comparison is still pending.",
-        ),
-        "read_job" if fit(catalog::GEMMA_4_E4B) == Some(Fit::Gpu) => (
-            Some(catalog::GEMMA_4_E4B),
-            "Strong results reading Danish job posts in our comparisons, and it fits fully on your graphics card.",
-        ),
-        _ => (
-            base,
-            "A compact choice for CV reading and matching: larger models did not improve those tasks in our comparisons. Sharing this model reduces downloads; writing quality still needs review.",
-        ),
+/// Only the assigned runtime adapts its unsaved defaults. Explicit task choices win.
+pub fn resolved(context: &Context, task: &Task, provider: &str, base: &str, saved: &str) -> String {
+    if let Some(runtime) = model_runtime::for_provider(provider) {
+        return runtime.resolve(context, task, base, saved);
+    }
+    let selected = task_model::model_for(task, provider, base, saved);
+    if selected.is_empty() {
+        crate::llm::default_model(provider).unwrap_or("").to_string()
+    } else {
+        selected
     }
 }
 
@@ -129,8 +101,7 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
     let keys = account_model::saved(context.db()).await?;
     let saved = task_model::saved(context.db()).await?;
     let assessment = assessment(context).await?;
-    let files = llama::model_files(context.llama.as_ref());
-    let mut downloads = std::collections::BTreeSet::new();
+    let mut downloads: BTreeMap<&str, RuntimeModels> = BTreeMap::new();
     let mut rows = Vec::new();
     for task in &TASKS {
         let key = account_model::picked_for(&keys, task.use_);
@@ -140,31 +111,17 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
             .map(|(_, value)| value.as_str())
             .unwrap_or("");
         let provider = key.map(|k| k.provider.as_str()).unwrap_or("");
-        let runtime = LocalRuntime::for_provider(provider);
+        let runtime = model_runtime::for_provider(provider);
+        let local = runtime.unwrap_or_else(|| model_runtime::default_runtime());
+        let state = local.state(context);
         let current = key
-            .map(|k| resolved(task, provider, &k.model, saved, context.llama.as_ref()))
+            .map(|k| resolved(context, task, provider, &k.model, saved))
             .unwrap_or_default();
-        let (suggested, why) = context.llama.as_ref().map(|s| recommendation(task, s)).unwrap_or((
-            None,
-            "Local setup is unavailable. Choose a provider in Language models.",
-        ));
-        // Existing cloud users keep their provider. The alternative is explicitly local.
-        let fit = suggested
-            .and_then(catalog::find)
-            .zip(context.llama.as_ref())
-            .map(|(m, s)| {
-                model_choice::fit(
-                    &m.as_gguf(&s.models_folder()),
-                    &s.inventory(),
-                    s.inventory().gpu.is_some(),
-                )
-                .label()
-            })
-            .unwrap_or_else(|| "No suitable local candidate with the known memory.".to_string());
-        let downloaded = files.iter().any(|f| f == &current);
+        let suggestion = local.recommendation(context, task);
+        let downloaded = runtime.is_some_and(|r| r.downloaded(context, &current));
         let check = assessment
             .as_ref()
-            .filter(|a| a.version == EVALUATION_VERSION && a.runtime_release == runtime_release(context))
+            .filter(|a| a.version == EVALUATION_VERSION && a.runtime_release == state.release)
             .and_then(|a| {
                 a.checks
                     .iter()
@@ -173,35 +130,38 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
             });
         if provider.is_empty() || runtime.is_some() {
             let target = if provider.is_empty() {
-                suggested.unwrap_or("")
+                suggestion.model.unwrap_or("")
             } else {
                 &current
             };
-            if !files.iter().any(|f| f == target) {
-                downloads.insert(target.to_string());
+            if !target.is_empty() {
+                downloads
+                    .entry(local.provider())
+                    .or_insert_with(|| RuntimeModels {
+                        runtime: local,
+                        models: BTreeSet::new(),
+                    })
+                    .models
+                    .insert(target.into());
             }
         }
         rows.push(Row {
             task,
-            provider: provider.to_string(),
+            provider: provider.into(),
             runtime,
+            runtime_available: state.available,
             current,
-            suggested,
-            why,
-            fit,
+            suggested: suggestion.model,
+            why: suggestion.why,
+            fit: suggestion.fit,
             downloaded,
             manual: !saved.is_empty(),
             check,
         });
     }
     let download_bytes = downloads
-        .iter()
-        .filter_map(|f| catalog::find(f))
-        .map(|m| {
-            context.llama.as_ref().map_or(m.bytes, |server| {
-                download::remaining_bytes(&m.url(), &server.models_folder().join(m.file), m.bytes)
-            })
-        })
+        .into_values()
+        .map(|m| m.runtime.download_bytes(context, &m.models))
         .sum();
     Ok(Overview {
         fresh: keys.is_empty(),
@@ -221,21 +181,14 @@ async fn save(context: &Context, assessment: &Assessment) -> Result<(), ServiceE
 }
 
 pub async fn evaluate_again(context: &Context) -> Result<String, ServiceError> {
-    let server = context
-        .llama
-        .as_ref()
-        .ok_or_else(|| ServiceError::new(ErrorKind::NotFound, "Local model setup is unavailable."))?;
-    let inventory = tokio::task::spawn_blocking(Inventory::detect)
-        .await
-        .map_err(|e| ServiceError::failed("models/hardware", e.to_string()))?;
-    server.refresh_inventory(inventory);
+    let state = model_runtime::default_runtime().evaluate(context).await?;
     save(
         context,
         &Assessment {
             version: EVALUATION_VERSION,
             at: chrono::Utc::now().timestamp(),
-            inventory: server.inventory(),
-            runtime_release: runtime_release(context),
+            inventory: state.inventory,
+            runtime_release: state.release,
             checks: Vec::new(),
         },
     )
@@ -255,7 +208,7 @@ pub async fn save_choices(context: &Context, chosen: &[(String, String)]) -> Res
             .find(|r| r.task.name == name)
             .ok_or_else(|| ServiceError::new(ErrorKind::Invalid, "Unknown model task."))?;
         let runtime = if plan.fresh {
-            LocalRuntime::LlamaCpp
+            model_runtime::default_runtime()
         } else {
             row.runtime.ok_or_else(|| {
                 ServiceError::new(
@@ -282,9 +235,15 @@ pub async fn save_choices(context: &Context, chosen: &[(String, String)]) -> Res
             .find(|(task, _)| task.name == "resume")
             .expect("all tasks chosen")
             .1;
-        account_model::save_local_choices(context.db(), &context.key_vault, base, &choices)
-            .await
-            .map_err(|e| ServiceError::internal("models/save", e.to_string()))?;
+        account_model::save_local_choices(
+            context.db(),
+            &context.key_vault,
+            model_runtime::default_runtime().provider(),
+            base,
+            &choices,
+        )
+        .await
+        .map_err(|e| ServiceError::internal("models/save", e.to_string()))?;
     } else {
         task_model::save(context.db(), &choices).await?;
     }
@@ -323,16 +282,14 @@ pub async fn download_selected(context: Arc<Context>) -> Result<String, ServiceE
 
 /// Dispatch each set of assigned files to its runtime's preparation adapter.
 pub async fn prepare(context: Arc<Context>) -> Result<String, ServiceError> {
-    let models = overview(&context).await?.local_models();
-    if models.is_empty() {
+    let plan = overview(&context).await?;
+    if plan.local_models().is_empty() {
         return Err(ServiceError::new(
             ErrorKind::Invalid,
             "No local tasks selected. Pick a local provider in Language models first.",
         ));
     }
-    for (runtime, files) in models {
-        runtime.prepare(&context, &files).await?;
-    }
+    plan.prepare_models(&context).await?;
     Ok("Your selected local models are ready. You can run a local check below or continue setup.".to_string())
 }
 
@@ -350,11 +307,10 @@ pub async fn check(context: &Context, name: &str) -> Result<String, ServiceError
             "Local checks require a downloaded model assigned to this task. No cloud call or download was made.",
         )
     })?;
-    let key = runtime.key(&row.current);
     let (prompt, expected) = fixture(name);
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        let llm = llama::use_key(context.llama.as_ref(), &key).await.map_err(|e| e.message)?;
+        let llm = runtime.load(context, &row.current).await.map_err(|e| e.message)?;
         llm.structured("Use only the supplied facts. Return the requested answer exactly; do not invent missing facts.", prompt,
             &json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
             Effort::Low, 256).await.map_err(|e| e.message)
@@ -374,10 +330,11 @@ pub async fn check(context: &Context, name: &str) -> Result<String, ServiceError
             "Loading and answering exceeded two minutes. Try a smaller model or inspect the runtime log.".to_string(),
         ),
     };
+    let state = runtime.state(context);
     let mut assessment = assessment_for_check(
         plan.assessment,
-        context.llama.as_ref().unwrap().inventory(),
-        runtime_release(context),
+        state.inventory,
+        state.release,
         chrono::Utc::now().timestamp(),
     );
     assessment.checks.retain(|c| c.task != name);
@@ -421,14 +378,6 @@ fn assessment_for_check(
         })
 }
 
-fn runtime_release(context: &Context) -> String {
-    context
-        .llama
-        .as_ref()
-        .and_then(|s| std::fs::read_to_string(s.folder().join("runtime-release.txt")).ok())
-        .unwrap_or_else(|| "External or unversioned runtime".to_string())
-}
-
 fn fixture(task: &str) -> (&'static str, &'static str) {
     match task {
         "application_form" => (
@@ -462,6 +411,7 @@ fn fixture(task: &str) -> (&'static str, &'static str) {
 mod tests {
     use super::*;
     use crate::llama::hardware::{GIB, Gpu, GpuVendor};
+    use crate::llama::{catalog, llama_server::LlamaServer};
     use crate::llm::LLAMA_CPP;
 
     async fn test_context(folder: &std::path::Path) -> Context {
@@ -732,8 +682,12 @@ mod tests {
                     .check
                     .is_none()
             );
-            let mut refreshed =
-                assessment_for_check(loaded.assessment, server.inventory(), runtime_release(&context), 10);
+            let mut refreshed = assessment_for_check(
+                loaded.assessment,
+                server.inventory(),
+                model_runtime::default_runtime().state(&context).release,
+                10,
+            );
             assert!(
                 refreshed.checks.is_empty(),
                 "old measurements must not be relabelled as current"
@@ -753,7 +707,12 @@ mod tests {
                     .unwrap()
                     .passed
             );
-            let current = assessment_for_check(reloaded.assessment, server.inventory(), runtime_release(&context), 20);
+            let current = assessment_for_check(
+                reloaded.assessment,
+                server.inventory(),
+                model_runtime::default_runtime().state(&context).release,
+                20,
+            );
             assert_eq!(
                 current.checks.len(),
                 1,
@@ -762,49 +721,58 @@ mod tests {
         }
         std::fs::remove_dir_all(folder).unwrap();
     }
-    #[test]
-    fn recommendations_are_task_specific_and_fit_small_hardware() {
-        let inventory = Inventory {
+    #[tokio::test]
+    async fn recommendations_are_task_specific_and_fit_small_hardware() {
+        let mut context = test_context(std::path::Path::new("/tmp/plan-test")).await;
+        context.llama.as_ref().unwrap().refresh_inventory(Inventory {
             memory_bytes: 16 * GIB,
             gpu: Some(Gpu {
                 name: "GPU".into(),
                 vendor: GpuVendor::Amd,
                 vram_bytes: 8 * GIB,
             }),
-        };
-        let server = LlamaServer::new(std::path::Path::new("/tmp/plan-test"), inventory);
+        });
+        let runtime = model_runtime::default_runtime();
         assert_eq!(
-            recommendation(&task_model::APPLICATION_FORM, &server).0,
+            runtime.recommendation(&context, &task_model::APPLICATION_FORM).model,
             Some(catalog::GRANITE_4_1_3B)
         );
-        assert_eq!(recommendation(&task_model::READ_CV, &server).0, Some(catalog::QWEN3_4B));
+        assert_eq!(
+            runtime.recommendation(&context, &task_model::READ_CV).model,
+            Some(catalog::QWEN3_4B)
+        );
         assert_eq!(
             resolved(
+                &context,
                 &task_model::READ_JOB,
                 LLAMA_CPP,
                 catalog::QWEN3_4B,
-                "custom.gguf",
-                Some(&server)
+                "custom.gguf"
             ),
             "custom.gguf"
         );
         assert_eq!(
-            resolved(&task_model::READ_JOB, "openai", "cloud-model", "", Some(&server)),
+            resolved(&context, &task_model::READ_JOB, "openai", "cloud-model", ""),
             "cloud-model"
         );
+        context.llama = None;
+        assert!(runtime.recommendation(&context, &task_model::READ_JOB).model.is_none());
     }
-    #[test]
-    fn too_large_implicit_default_uses_the_selected_base_model() {
-        let server = LlamaServer::new(
-            std::path::Path::new("/tmp/small-plan-test"),
-            Inventory {
-                memory_bytes: 10 * GIB,
-                gpu: None,
-            },
-        );
+
+    #[tokio::test]
+    async fn too_large_implicit_default_uses_the_selected_base_model() {
+        let context = test_context(std::path::Path::new("/tmp/small-plan-test")).await;
+        context.llama.as_ref().unwrap().refresh_inventory(Inventory {
+            memory_bytes: 10 * GIB,
+            gpu: None,
+        });
         assert_eq!(
-            resolved(&task_model::READ_JOB, LLAMA_CPP, catalog::QWEN3_4B, "", Some(&server)),
+            resolved(&context, &task_model::READ_JOB, LLAMA_CPP, catalog::QWEN3_4B, ""),
             catalog::QWEN3_4B
         );
     }
 }
+
+#[cfg(test)]
+#[path = "model_runtime/dispatch_tests.rs"]
+mod runtime_dispatch_tests;
