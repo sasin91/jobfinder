@@ -70,10 +70,7 @@ mod tests {
         )
         .await
         .unwrap();
-        db.execute(include_str!("../../migrations/0018_app_state.sql"))
-            .await
-            .unwrap();
-        db.execute(include_str!("../../migrations/0019_typed_setup_state.sql"))
+        db.execute(include_str!("../../migrations/0018_setup_state.sql"))
             .await
             .unwrap();
         assert!(read(&db).await.unwrap().completed);

@@ -58,11 +58,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0017_application_form_model",
         include_str!("../migrations/0017_application_form_model.sql"),
     ),
-    ("0018_app_state", include_str!("../migrations/0018_app_state.sql")),
-    (
-        "0019_typed_setup_state",
-        include_str!("../migrations/0019_typed_setup_state.sql"),
-    ),
+    ("0018_setup_state", include_str!("../migrations/0018_setup_state.sql")),
 ];
 
 /// How long a write waits for another connection's write to finish, in milliseconds.
