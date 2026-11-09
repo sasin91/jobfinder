@@ -209,7 +209,7 @@ pub async fn check_key(context: &Context, provider: &str) -> Result<String, Serv
         .await
         .map_err(|e| ServiceError::internal("account/check_key", format!("The check couldn't read your key: {e}")))?
         .ok_or_else(|| ServiceError::need_key("There's no key to check: save one first."))?;
-    let llm = llama::use_key(context.llama.as_ref(), &key)
+    let llm = super::model_runtime::load_key(context, &key)
         .await
         .map_err(|e| ServiceError::failed("account/check_key", format!("The check failed: {}", e.details())))?;
     let schema = json!({

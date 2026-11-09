@@ -147,7 +147,13 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                 base_url: state.base_url.clone(),
             };
             return runner.run(
-                move |context| async move { account_service::save_key(&context, &form).await },
+                move |context| async move {
+                    let saved = account_service::save_key(&context, &form).await?;
+                    if form.provider == LLAMA_CPP && matches!(saved, SaveKey::Saved { .. }) {
+                        crate::account::model_plan::download_selected(context).await?;
+                    }
+                    Ok::<_, crate::service_error::ServiceError>(saved)
+                },
                 |answer| Msg::Saved(answer.and_then(|saved| saved.map(Arc::new).map_err(|e| e.message))),
             );
         }
@@ -188,7 +194,10 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             state.busy = true;
             let chosen = use_choices(&state.uses);
             return runner.run(
-                move |context| async move { account_service::save_uses(&context, &chosen).await.map(str::to_string) },
+                move |context| async move {
+                    account_service::save_uses(&context, &chosen).await?;
+                    crate::account::model_plan::download_selected(context).await
+                },
                 said(true),
             );
         }
@@ -265,9 +274,8 @@ fn save_task_model(state: &mut State, index: usize, runner: &Runner) -> Task<Msg
     state.busy = true;
     runner.run(
         move |context| async move {
-            account_service::save_task_models(&context, &chosen)
-                .await
-                .map(str::to_string)
+            account_service::save_task_models(&context, &chosen).await?;
+            crate::account::model_plan::download_selected(context).await
         },
         said(true),
     )
