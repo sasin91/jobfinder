@@ -19,6 +19,7 @@ pub mod llama_setup_service;
 pub mod model_advice;
 pub mod model_assessment;
 pub mod model_plan;
+pub mod model_runtime;
 pub mod saved_key;
 pub mod task_model;
 pub mod task_model_row;

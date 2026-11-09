@@ -9,12 +9,11 @@ use std::time::Duration;
 
 use super::match_documents::Uses;
 use crate::account::account_model::{self, APPLICATION, JOB_EVALUATION, KeyFor, RESUME, USES};
-use crate::account::llama_setup_service;
+use crate::account::model_runtime;
 use crate::account::task_model::{self, Task};
 use crate::context::Context;
 use crate::game_mode::stand_in::{self, StandIn};
-use crate::llama;
-use crate::llm::{LLAMA_CPP, Llm};
+use crate::llm::Llm;
 use crate::service_error::{ErrorKind, ServiceError};
 
 /// A model to call, and who it is as the documents it writes record it ("openai/gpt-5.4-mini").
@@ -52,10 +51,10 @@ pub async fn llm(context: &Context, task: &Task) -> Result<KeyedLlm, ServiceErro
             ..key
         },
     };
-    if key.provider == LLAMA_CPP {
-        llama_setup_service::download_if_missing(context, &key.model).await?;
+    if let Some(runtime) = model_runtime::for_provider(&key.provider) {
+        runtime.ensure_model(context, &key.model).await?;
     }
-    let llm = llama::use_key(context.llama.as_ref(), &key)
+    let llm = model_runtime::load_key(context, &key)
         .await
         .map_err(|e| ServiceError::llm(&format!("llm ({})", task.name), &e))?;
     let written_by = format!("{}/{}", key.provider, llm.model());
@@ -95,11 +94,11 @@ async fn task_model_of(context: &Context, task: &Task, key: &KeyFor) -> Result<S
         )
     })?;
     Ok(crate::account::model_plan::resolved(
+        context,
         task,
         &key.provider,
         &key.model,
         &saved,
-        context.llama.as_ref(),
     ))
 }
 

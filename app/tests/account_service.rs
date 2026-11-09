@@ -88,7 +88,15 @@ async fn model_reassessment_preserves_explicit_task_and_provider_choices() {
         "local check must never call a cloud provider"
     );
     assert!(
-        model_plan::apply(&context, "application_form").await.is_err(),
+        model_plan::save_choices(
+            &context,
+            &[(
+                "application_form".into(),
+                jobfinder::llama::catalog::GRANITE_4_1_3B.into()
+            )]
+        )
+        .await
+        .is_err(),
         "local suggestion must never change cloud task routing"
     );
     assert_eq!(
