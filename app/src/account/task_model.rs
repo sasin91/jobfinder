@@ -138,6 +138,11 @@ pub async fn saved_for(db: &SqlitePool, task: &Task) -> sqlx::Result<String> {
 /// Saves each (task, model); "" runs the task on its default again.
 pub async fn save(db: &SqlitePool, chosen: &[(&'static Task, String)]) -> sqlx::Result<()> {
     let mut tx = crate::db::write_transaction(db).await?;
+    save_on(&mut tx, chosen).await?;
+    tx.commit().await
+}
+
+pub(super) async fn save_on(connection: &mut SqliteConnection, chosen: &[(&'static Task, String)]) -> sqlx::Result<()> {
     for (task, model) in chosen {
         sqlx::query!(
             r#"
@@ -147,10 +152,10 @@ pub async fn save(db: &SqlitePool, chosen: &[(&'static Task, String)]) -> sqlx::
             task.name,
             model
         )
-        .execute(&mut *tx)
+        .execute(&mut *connection)
         .await?;
     }
-    tx.commit().await
+    Ok(())
 }
 
 /// Forgets the models saved for the tasks of each of uses, which now run on another key or on

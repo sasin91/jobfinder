@@ -48,6 +48,7 @@ pub struct Row {
 }
 
 pub struct Overview {
+    pub fresh: bool,
     pub rows: Vec<Row>,
     pub assessment: Option<Assessment>,
     pub download_bytes: u64,
@@ -69,7 +70,14 @@ pub fn resolved(task: &Task, provider: &str, base: &str, saved: &str, server: Op
     }
     if selected.is_empty() {
         if provider == LLAMA_CPP {
-            return server.and_then(|s| s.overview().chosen.ok()).unwrap_or_default();
+            return server
+                .and_then(|s| {
+                    s.overview()
+                        .chosen
+                        .ok()
+                        .or_else(|| recommendation(task, s).0.map(str::to_string))
+                })
+                .unwrap_or_default();
         }
         return crate::llm::default_model(provider).unwrap_or("").to_string();
     }
@@ -88,15 +96,15 @@ pub fn recommendation(task: &Task, server: &LlamaServer) -> (Option<&'static str
     match task.name {
         "application_form" if fit(catalog::GRANITE_4_1_3B).is_some_and(|f| f != Fit::TooBig) => (
             Some(catalog::GRANITE_4_1_3B),
-            "IBM Granite 4.1 3B Q4_K_M: compact form-answer candidate with successful user experience. Run the local check; broader quality benchmarking is still pending.",
+            "A compact model for short, structured form answers. It has worked well in previous use; broader quality comparison is still pending.",
         ),
         "read_job" if fit(catalog::GEMMA_4_E4B) == Some(Fit::Gpu) => (
             Some(catalog::GEMMA_4_E4B),
-            "Gemma 4 E4B Q4_K_M: the repository's job-reading evaluation favors it for Danish posts, and it fits this GPU.",
+            "Strong results reading Danish job posts in our comparisons, and it fits fully on your graphics card.",
         ),
         _ => (
             base,
-            "Qwen3 4B Q4_K_M: the repository's bake-off found it competitive with larger models for CV reading and matching. Reusing it limits downloads and model switching; writing quality still needs review.",
+            "A compact choice for CV reading and matching: larger models did not improve those tasks in our comparisons. Sharing this model reduces downloads; writing quality still needs review.",
         ),
     }
 }
@@ -178,6 +186,7 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
         })
         .sum();
     Ok(Overview {
+        fresh: keys.is_empty(),
         rows,
         assessment,
         download_bytes,
@@ -216,8 +225,101 @@ pub async fn evaluate_again(context: &Context) -> Result<String, ServiceError> {
     Ok("Hardware and model fit evaluated again. Your choices are unchanged. Run a local check to measure a downloaded model.".to_string())
 }
 
-/// Prepare the exact current local assignments, or the displayed suggestions on a fresh setup.
-/// A separate action is required to replace a saved model with a suggested alternative.
+/// Save an explicit set of local choices. Downloads follow this action in the UI; keeping the
+/// assignments first makes interrupted downloads recoverable without choosing everything again.
+pub async fn save_choices(context: &Context, chosen: &[(String, String)]) -> Result<(), ServiceError> {
+    let plan = overview(context).await?;
+    let server = context
+        .llama
+        .as_ref()
+        .ok_or_else(|| ServiceError::new(ErrorKind::NotFound, "Local model setup is unavailable."))?;
+    let mut choices = Vec::new();
+    for (name, file) in chosen {
+        let row = plan
+            .rows
+            .iter()
+            .find(|r| r.task.name == name)
+            .ok_or_else(|| ServiceError::new(ErrorKind::Invalid, "Unknown model task."))?;
+        if !plan.fresh && row.provider != LLAMA_CPP {
+            return Err(ServiceError::new(
+                ErrorKind::Invalid,
+                "This task uses another provider. Change its provider in Language models first.",
+            ));
+        }
+        if choices.iter().any(|(task, _): &(&Task, String)| task.name == name) {
+            return Err(ServiceError::new(ErrorKind::Invalid, "Choose one model per task."));
+        }
+        let model = server
+            .models()
+            .into_iter()
+            .find(|m| m.name == *file)
+            .or_else(|| catalog::find(file).map(|m| m.as_gguf(&server.models_folder())))
+            .ok_or_else(|| {
+                ServiceError::new(
+                    ErrorKind::Invalid,
+                    "Choose a model from the catalog or an existing model file.",
+                )
+            })?;
+        if model_choice::fit(&model, &server.inventory(), server.inventory().gpu.is_some()) == Fit::TooBig {
+            return Err(ServiceError::new(
+                ErrorKind::Invalid,
+                format!("{file} does not fit the detected memory."),
+            ));
+        }
+        choices.push((row.task, file.clone()));
+    }
+    if choices.is_empty() || (plan.fresh && choices.len() != TASKS.len()) {
+        return Err(ServiceError::new(
+            ErrorKind::Invalid,
+            "Choose a model for every local task first.",
+        ));
+    }
+    if plan.fresh {
+        let base = &choices
+            .iter()
+            .find(|(task, _)| task.name == "resume")
+            .expect("all tasks chosen")
+            .1;
+        account_model::save_local_choices(context.db(), &context.key_vault, base, &choices)
+            .await
+            .map_err(|e| ServiceError::internal("models/save", e.to_string()))?;
+    } else {
+        task_model::save(context.db(), &choices).await?;
+    }
+    Ok(())
+}
+
+/// Model selections automatically prepare their local files. Cloud-only choices need no download.
+pub async fn download_selected(context: Arc<Context>) -> Result<String, ServiceError> {
+    if !overview(&context).await?.rows.iter().any(|r| r.provider == LLAMA_CPP) {
+        return Ok("Model choices saved.".into());
+    }
+    let work = Arc::clone(&context.running);
+    let result = work
+        .run(
+            crate::task_manager::running_work::WorkKind::Download,
+            "Download selected models",
+            prepare(context),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(ServiceError::failed(
+                "models",
+                "Download stopped. Your choices and partial files are kept; retry in Models to resume.",
+            ))
+        });
+    result.map_err(|e| {
+        ServiceError::failed(
+            "models/download",
+            format!(
+                "Your model choices are saved. Download needs attention: {}. Retry in Models to resume.",
+                e.message
+            ),
+        )
+    })
+}
+
+/// Download the exact saved local assignments, once per shared model, with the runtime.
 pub async fn prepare(context: Arc<Context>) -> Result<String, ServiceError> {
     let server = context
         .llama
@@ -235,12 +337,9 @@ pub async fn prepare(context: Arc<Context>) -> Result<String, ServiceError> {
 
 async fn prepare_inner(context: &Context, server: &LlamaServer) -> Result<String, ServiceError> {
     let plan = overview(context).await?;
-    let fresh = account_model::saved(context.db()).await?.is_empty();
     let mut targets = std::collections::BTreeSet::new();
     for row in &plan.rows {
-        if fresh {
-            targets.extend(row.suggested);
-        } else if row.provider == LLAMA_CPP {
+        if row.provider == LLAMA_CPP {
             targets.insert(row.current.as_str());
         }
     }
@@ -248,12 +347,6 @@ async fn prepare_inner(context: &Context, server: &LlamaServer) -> Result<String
         return Err(ServiceError::new(
             ErrorKind::Invalid,
             "No local tasks selected. Pick a local provider in Language models first.",
-        ));
-    }
-    if fresh && plan.rows.iter().any(|r| r.suggested.is_none()) {
-        return Err(ServiceError::new(
-            ErrorKind::Invalid,
-            "There is not enough known memory for the complete local plan. Choose a cloud provider or configure individual tasks.",
         ));
     }
     for file in &targets {
@@ -302,49 +395,7 @@ async fn prepare_inner(context: &Context, server: &LlamaServer) -> Result<String
             .await
             .map_err(|e| ServiceError::failed("models/download", e))?;
     }
-    if fresh {
-        if !account_model::saved(context.db()).await?.is_empty() {
-            return Ok("Downloads finished. Provider settings changed during preparation, so no model assignments were applied. Review Models before continuing.".into());
-        }
-        account_model::save(context.db(), &context.key_vault, LLAMA_CPP, catalog::QWEN3_4B, "", "")
-            .await
-            .map_err(|e| ServiceError::internal("models/save", e.to_string()))?;
-        let choices: Vec<_> = plan
-            .rows
-            .iter()
-            .filter_map(|r| r.suggested.map(|f| (r.task, f.to_string())))
-            .collect();
-        task_model::save(context.db(), &choices).await?;
-    }
-    Ok("Task models are downloaded and configured. Run local checks before importing your CV. You can review each task below.".to_string())
-}
-
-/// Applying one proposal is explicit, local-only, and requires its file to be present.
-pub async fn apply(context: &Context, name: &str) -> Result<String, ServiceError> {
-    let plan = overview(context).await?;
-    let row = plan
-        .rows
-        .iter()
-        .find(|r| r.task.name == name)
-        .ok_or_else(|| ServiceError::new(ErrorKind::Invalid, "Unknown model task."))?;
-    if row.provider != LLAMA_CPP {
-        return Err(ServiceError::new(
-            ErrorKind::Invalid,
-            "Choose the local provider for this task in Language models first.",
-        ));
-    }
-    let file = row
-        .suggested
-        .ok_or_else(|| ServiceError::new(ErrorKind::Invalid, "No local suggestion fits."))?;
-    let server = context.llama.as_ref().expect("suggestion requires a server");
-    if !server.models().iter().any(|m| m.name == file) {
-        return Err(ServiceError::new(
-            ErrorKind::Invalid,
-            "Download the suggested model in the catalog below, then apply it.",
-        ));
-    }
-    task_model::save(context.db(), &[(row.task, file.to_string())]).await?;
-    Ok(format!("{} now uses {file}.", row.task.label))
+    Ok("Your selected local models are ready. You can run a local check below or continue setup.".to_string())
 }
 
 /// A small repeatable correctness/compatibility check, not a claim of broad model quality.
@@ -495,6 +546,152 @@ mod tests {
             },
         ));
         context
+    }
+
+    fn selections(file: &str) -> Vec<(String, String)> {
+        TASKS.iter().map(|task| (task.name.into(), file.into())).collect()
+    }
+
+    #[tokio::test]
+    async fn explicit_first_run_choices_are_saved_before_files_are_downloaded() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-explicit-models-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        let mut chosen = selections(catalog::QWEN3_4B);
+        chosen
+            .iter_mut()
+            .find(|(task, _)| task == "application_form")
+            .unwrap()
+            .1 = catalog::GRANITE_4_1_3B.into();
+        // Deliberately override the recommendation for one task.
+        chosen.iter_mut().find(|(task, _)| task == "read_cv").unwrap().1 = catalog::GRANITE_4_1_3B.into();
+        save_choices(&context, &chosen).await.unwrap();
+        let plan = overview(&context).await.unwrap();
+        assert!(!plan.fresh);
+        for row in &plan.rows {
+            assert_eq!(row.provider, LLAMA_CPP);
+            assert_eq!(
+                &row.current,
+                &chosen.iter().find(|(task, _)| task == row.task.name).unwrap().1
+            );
+            assert!(row.manual);
+            assert!(!row.downloaded);
+        }
+        assert_eq!(
+            plan.download_bytes,
+            catalog::find(catalog::QWEN3_4B).unwrap().bytes + catalog::find(catalog::GRANITE_4_1_3B).unwrap().bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_duplicate_unknown_and_oversized_choices_leave_first_run_untouched() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-invalid-choices-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        let mut incomplete = selections(catalog::QWEN3_4B);
+        incomplete.pop();
+        let mut duplicate = selections(catalog::QWEN3_4B);
+        duplicate[1] = duplicate[0].clone();
+        let mut unknown = selections(catalog::QWEN3_4B);
+        unknown[1].0 = "unknown".into();
+        // 14B needs more than this test computer's available memory budget.
+        for chosen in [
+            incomplete,
+            duplicate,
+            unknown,
+            selections("unknown.gguf"),
+            selections("Qwen3-14B-Q4_K_M.gguf"),
+        ] {
+            assert!(save_choices(&context, &chosen).await.is_err());
+            assert!(account_model::saved(context.db()).await.unwrap().is_empty());
+            assert!(task_model::saved(context.db()).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn first_run_routing_rolls_back_when_task_choices_cannot_be_saved() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-choices-rollback-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        sqlx::query("CREATE TRIGGER reject_choices BEFORE INSERT ON llm_task_models BEGIN SELECT RAISE(ABORT, 'test rollback'); END")
+            .execute(context.db()).await.unwrap();
+        assert!(save_choices(&context, &selections(catalog::QWEN3_4B)).await.is_err());
+        assert!(account_model::saved(context.db()).await.unwrap().is_empty());
+        assert!(task_model::saved(context.db()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn preparing_downloaded_choices_never_fetches_recommendations_and_failure_keeps_choices() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-selected-files-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        let server = context.llama.as_ref().unwrap();
+        std::fs::create_dir_all(server.models_folder()).unwrap();
+        let file = server.models_folder().join("custom.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        std::fs::write(folder.join(crate::llama::llama_server::SERVER_FILE), b"test runtime").unwrap();
+        save_choices(&context, &selections("custom.gguf")).await.unwrap();
+        let context = Arc::new(context);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            download_selected(Arc::clone(&context)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(overview(&context).await.unwrap().download_bytes, 0);
+        std::fs::remove_file(file).unwrap();
+        let error = download_selected(Arc::clone(&context)).await.unwrap_err();
+        assert!(error.message.contains("choices are saved"));
+        assert!(
+            overview(&context)
+                .await
+                .unwrap()
+                .rows
+                .iter()
+                .all(|r| r.current == "custom.gguf")
+        );
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_edits_preserve_cloud_routing_and_other_explicit_choices() {
+        let folder = std::env::temp_dir().join(format!("jobfinder-mixed-choices-{}", std::process::id()));
+        let context = test_context(&folder).await;
+        save_choices(&context, &selections(catalog::QWEN3_4B)).await.unwrap();
+        account_model::save(context.db(), &context.key_vault, "openai", "cloud-model", "", "sk-test")
+            .await
+            .unwrap();
+        account_model::save_uses(
+            context.db(),
+            &account_model::UseChoices {
+                resume: Some(LLAMA_CPP.into()),
+                application: Some("openai".into()),
+                job_evaluation: Some(LLAMA_CPP.into()),
+            },
+        )
+        .await
+        .unwrap();
+        task_model::save(
+            context.db(),
+            &[(&task_model::APPLICATION_FORM, "custom-cloud-model".into())],
+        )
+        .await
+        .unwrap();
+        save_choices(&context, &[("read_cv".into(), catalog::GRANITE_4_1_3B.into())])
+            .await
+            .unwrap();
+        let plan = overview(&context).await.unwrap();
+        let cv = plan.rows.iter().find(|r| r.task.name == "read_cv").unwrap();
+        assert_eq!(cv.current, catalog::GRANITE_4_1_3B);
+        let cloud = plan.rows.iter().find(|r| r.task.name == "application_form").unwrap();
+        assert_eq!(cloud.provider, "openai");
+        assert_eq!(cloud.current, "custom-cloud-model");
+        assert_eq!(
+            plan.rows.iter().find(|r| r.task.name == "judge").unwrap().current,
+            catalog::QWEN3_4B
+        );
+        assert!(
+            save_choices(&context, &[("application_form".into(), catalog::GRANITE_4_1_3B.into())])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

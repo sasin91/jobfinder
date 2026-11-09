@@ -623,6 +623,15 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
             message,
             setup_unfinished,
         }) => {
+            let runner = shell.runner();
+            let _ = local_model::update(
+                &mut shell.local_model,
+                local_model::Msg::ModelInUse {
+                    message: message.clone(),
+                    setup_unfinished,
+                },
+                &runner,
+            );
             // To Setup while it is unfinished, else to where the
             // model's uses are picked, since the uses stay on the key they were on.
             if setup_unfinished {

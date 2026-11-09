@@ -261,6 +261,27 @@ pub async fn save(
     Ok(())
 }
 
+/// Save first-run local routing and its explicit task choices atomically.
+pub async fn save_local_choices(
+    db: &SqlitePool,
+    vault: &KeyVault,
+    base: &str,
+    choices: &[(&'static task_model::Task, String)],
+) -> Result<(), Error> {
+    let _together = vault.lock().await;
+    let mut tx = crate::db::write_transaction(db).await?;
+    let provider = LLAMA_CPP;
+    let empty = "";
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query_file!("queries/account_model/save.sql", provider, base, empty, empty, now)
+        .execute(&mut *tx)
+        .await?;
+    vault.delete(&mut *tx, provider).await.map_err(Error::Vault)?;
+    task_model::save_on(&mut tx, choices).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Deletes the provider's saved key, its row and its key together. The uses it was
 /// picked for run on no key until another is picked, and forget their tasks' models.
 pub async fn delete_key(db: &SqlitePool, vault: &KeyVault, provider: &str) -> Result<(), Error> {

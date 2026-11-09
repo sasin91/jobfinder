@@ -8,18 +8,18 @@ use std::sync::Arc;
 use iced::widget::{Column, button, checkbox, column, container, pick_list, row, text, text_editor, text_input};
 use iced::{Center, Element, Fill, Task};
 
-use super::drawings;
 use super::matching::{Picked, pick_file};
 use super::style;
 use super::widgets::{self, CARD_PADDING};
 use super::{GAP, Runner};
+use super::{drawings, local_model};
 use crate::dashboard::Health;
 use crate::job_scan::{
     scan_lock, scan_service,
     search_service::{self, SaveError, SearchForm},
 };
 use crate::scan_schedule::{DEFAULT_INTERVAL_HOURS, INTERVALS};
-use crate::setup::setup_steps::{self, AiStep, CvStep, DatabaseStep, ScheduleStep};
+use crate::setup::setup_steps::{self, CvStep, DatabaseStep, ScheduleStep};
 
 /// The CV box's height.
 const CV_BOX_HEIGHT: f32 = 220.0;
@@ -31,7 +31,6 @@ const YEARS_BOX_WIDTH: f32 = 80.0;
 /// The four steps as read.
 pub struct Steps {
     database: DatabaseStep,
-    ai: AiStep,
     cv: CvStep,
     schedule: ScheduleStep,
     search: setup_steps::SearchStep,
@@ -66,6 +65,7 @@ fn interval_of(hours: Option<u32>) -> Option<Interval> {
 
 #[derive(Default)]
 pub struct State {
+    models: local_model::State,
     /// None until read; Err says why it couldn't be.
     steps: Option<Result<Arc<Steps>, String>>,
     cv_text: text_editor::Content,
@@ -93,6 +93,7 @@ pub struct State {
 
 #[derive(Clone)]
 pub enum Msg {
+    Models(local_model::Msg),
     Load,
     Stage(usize),
     StageRecorded(Result<(), String>),
@@ -142,23 +143,33 @@ pub enum Msg {
 
 pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
     match msg {
+        Msg::Models(local_model::Msg::ShowLanguageModels) => return Task::done(Msg::ShowLanguageModels),
+        Msg::Models(local_model::Msg::ShowFullModels) => return Task::done(Msg::ShowLocalModel),
+        Msg::Models(msg) => {
+            let finished = matches!(msg, local_model::Msg::Said(_));
+            let task = local_model::update(&mut state.models, msg, runner).map(Msg::Models);
+            return if finished {
+                Task::batch([task, Task::done(Msg::Load)])
+            } else {
+                task
+            };
+        }
         Msg::Load => {
-            return runner.run(
-                |context| async move {
-                    let ai = setup_steps::ai(&context)
-                        .await
-                        .map_err(|e| format!("The database couldn't answer: {e}"))?;
-                    let cv = setup_steps::cv(&context).await?;
-                    Ok(Arc::new(Steps {
-                        database: setup_steps::database(&context),
-                        ai,
-                        cv,
-                        schedule: setup_steps::schedule(&context).await,
-                        search: setup_steps::search_step(&context).await.map_err(|e| e.message)?,
-                    }))
-                },
-                |read| Msg::Loaded(read.and_then(|steps| steps)),
-            );
+            return Task::batch([
+                runner.run(
+                    |context| async move {
+                        let cv = setup_steps::cv(&context).await?;
+                        Ok(Arc::new(Steps {
+                            database: setup_steps::database(&context),
+                            cv,
+                            schedule: setup_steps::schedule(&context).await,
+                            search: setup_steps::search_step(&context).await.map_err(|e| e.message)?,
+                        }))
+                    },
+                    |read| Msg::Loaded(read.and_then(|steps| steps)),
+                ),
+                Task::done(Msg::Models(local_model::Msg::Load)),
+            ]);
         }
         Msg::Loaded(steps) => {
             if let Ok(steps) = &steps {
@@ -451,7 +462,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     let labels = ["Welcome", "Models", "Your CV", "Jobs & sites", "First scan", "Schedule"];
     let done = [
         true,
-        !steps.ai.saved.is_empty(),
+        local_model::ready(&state.models),
         steps.cv.filled.is_some(),
         steps.search.id > 0 && !state.search_dirty,
         steps.search.scan_summary.is_some() || steps.search.progress.skipped_scan,
@@ -474,12 +485,12 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             } else {
                 style::standard_button
             })
-            .on_press_maybe((!state.busy).then_some(Msg::Stage(index))),
+            .on_press_maybe((!state.busy && (index <= 1 || done[1])).then_some(Msg::Stage(index))),
         );
     }
     let content = match state.stage {
         0 => step("Welcome — your data and this computer", true, database_step(&steps.database)),
-        1 => step("Choose and prepare your models", done[1], ai_step(&steps.ai)),
+        1 => step("Choose your models", done[1], local_model::setup_view(&state.models).map(Msg::Models)),
         2 => step("Import and review your CV", done[2], cv_step(&steps.cv, state)),
         3 => step("Define your jobs and choose sites", done[3], search_step(&steps.search, state)),
         4 => step("Try your first scan", done[4], first_scan(&steps.search, state)),
@@ -487,7 +498,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             schedule_step(&steps.schedule, state),
             button(text(if steps.search.progress.manual_scan && steps.schedule.interval_hours.is_none() { "Manual scanning selected" } else { "I'll scan manually" }).size(style::BODY_SIZE))
                 .style(style::standard_button).on_press_maybe((!state.busy).then_some(Msg::Manual)),
-            widgets::caption("Finish saves this setup choice. If anything is missing, you'll see what needs attention. You can revisit Setup from Settings at any time."),
+            widgets::caption("Finish saves this setup choice. If anything is missing, you'll see what needs attention. You can revisit Setup from the sidebar at any time."),
         ].spacing(8).into()),
     };
     let mut navigation = row![
@@ -510,7 +521,10 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             button(text("Continue").size(style::BODY_SIZE))
                 .padding([8.0, 16.0])
                 .style(style::primary_button)
-                .on_press_maybe((!state.busy && !state.search_dirty).then_some(Msg::Stage(state.stage + 1))),
+                .on_press_maybe(
+                    (!state.busy && !state.search_dirty && (state.stage != 1 || done[1]))
+                        .then_some(Msg::Stage(state.stage + 1)),
+                ),
         );
     } else {
         navigation = navigation.push(
@@ -639,63 +653,6 @@ fn database_step(database: &DatabaseStep) -> Element<'_, Msg> {
     ]
     .spacing(6)
     .into()
-}
-
-fn ai_step(ai: &AiStep) -> Element<'_, Msg> {
-    if !ai.saved.is_empty() {
-        let mut body = column![text("The AI runs on:").size(style::BODY_SIZE)].spacing(6);
-        for saved in &ai.saved {
-            body = body.push(text(format!("• {saved}")).size(style::BODY_SIZE));
-        }
-        return body
-            .push(
-                button(text("Review models and task choices").size(style::BODY_SIZE))
-                    .style(style::standard_button)
-                    .on_press(Msg::ShowLocalModel),
-            )
-            .into();
-    }
-    let advice = &ai.advice;
-    let mut body = column![widgets::note(
-        "The AI reads your CV and the job posts, and writes applications and résumés."
-    )]
-    .spacing(8);
-    match &advice.local {
-        Some(local) => {
-            body = body
-                .push(text("Suggested: this app's own model").font(style::semibold()).size(style::BODY_SIZE))
-                .push(widgets::caption(format!(
-                    "It runs on this computer, so it needs no API key and costs nothing per use, and your CV and the job posts stay here. This computer ({}) runs {} ({}): it {}.",
-                    advice.computer, local.label, local.size, local.fit
-                )))
-                .push(
-                    row![
-                        button(text("Set up this app's own model").size(style::BODY_SIZE))
-                            .style(style::primary_button)
-                            .on_press(Msg::ShowLocalModel),
-                        button(text("Use an OpenAI or Claude API key instead").size(style::BODY_SIZE))
-                            .style(style::standard_button)
-                            .on_press(Msg::ShowLanguageModels),
-                    ]
-                    .spacing(8),
-                );
-        }
-        None => {
-            body = body
-                .push(text("Suggested: an OpenAI API key").font(style::semibold()).size(style::BODY_SIZE))
-                .push(widgets::caption(format!(
-                    "An OpenAI key runs on {} by default; a Claude key works too. A fast local AI match is not established from the detected hardware. You can still explore local CPU options in Models.",
-                    advice.openai_model
-                )))
-                .push(
-                    button(text("Add an API key").size(style::BODY_SIZE))
-                        .style(style::primary_button)
-                        .on_press(Msg::ShowLanguageModels),
-                )
-                .push(button(text("Explore local models").size(style::BODY_SIZE)).style(style::standard_button).on_press(Msg::ShowLocalModel));
-        }
-    }
-    body.into()
 }
 
 fn cv_step<'a>(cv: &'a CvStep, state: &'a State) -> Element<'a, Msg> {

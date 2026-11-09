@@ -222,12 +222,23 @@ storage changes; `evaluation_version` identifies the test criteria.
 Constraints enforce flags, step ranges and complete optional GPU information.
 Assessment metadata and its child checks are saved in one transaction.
 
-Models in the main navigation shows actual per-task routing, local alternatives,
-rationales, downloaded status and saved smoke-check results. Evaluate again is
-explicit and preserves settings. Fresh local preparation downloads a deduplicated
-plan and assigns Granite 4.1 3B Q4_K_M for forms, Qwen3 4B for general work and
-Gemma for job reading when it fits the GPU. Existing provider and task assignments
-are preserved. Alternative models can be downloaded and applied per task.
+Setup's Models step embeds a simpler version of the Models overview: detected
+hardware, six task selectors, recommendations with reasons and fit estimates,
+shared-model download totals, progress/retry, and optional local checks. Cloud
+and external provider configuration stays behind an advanced-choices link.
+Users can adjust every task before choosing **Use these models**. This saves the
+explicit choices and automatically downloads their missing local files and
+runtime; there is no separate download-plan action. Choices are retained if a
+download is interrupted, and Continue waits for the selected files and runtime.
+
+Models in the main navigation uses the same task selectors and download action,
+with the complete catalog and folder controls below. Evaluate again is explicit
+and preserves settings. Granite 4.1 3B Q4_K_M is recommended for forms, Qwen3 4B
+for general work and Gemma for job reading when it fits the GPU. Existing cloud
+providers and manual task assignments are preserved until explicitly edited.
+Advanced provider/task changes also prepare their selected local assignments
+automatically. First-run provider routing and all six task choices commit in one
+transaction before downloads begin.
 
 Linux runtime asset selection supports x86_64 and aarch64 CPU/Vulkan archives and
 compatible available CUDA 12.8 archives. Installation preserves executable modes
