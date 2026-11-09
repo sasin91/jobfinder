@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT completed AS \"completed!: bool\", manual_scan AS \"manual_scan!: bool\", skipped_scan AS \"skipped_scan!: bool\", current_step FROM onboarding WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "completed!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "onboarding",
+            "name": "completed"
+          }
+        }
+      },
+      {
+        "name": "manual_scan!: bool",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "onboarding",
+            "name": "manual_scan"
+          }
+        }
+      },
+      {
+        "name": "skipped_scan!: bool",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "onboarding",
+            "name": "skipped_scan"
+          }
+        }
+      },
+      {
+        "name": "current_step",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "onboarding",
+            "name": "current_step"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e9f6479a55a86e6d209bbe1e78b1b0d4c72e3606f6842ed03703721437003b3e"
+}

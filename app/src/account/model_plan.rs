@@ -1,6 +1,5 @@
 //! A shared explanation of actual task routing and optional local alternatives.
 //! Assessment never downloads models, changes providers or overwrites task choices.
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -15,12 +14,9 @@ use crate::llama::{
 };
 use crate::llm::{Effort, LLAMA_CPP};
 use crate::service_error::{ErrorKind, ServiceError};
-use crate::setup::progress;
-
-const DOCUMENT: &str = "model-assessment";
 pub const EVALUATION_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Check {
     pub task: String,
     pub model: String,
@@ -30,12 +26,11 @@ pub struct Check {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assessment {
     pub version: u32,
     pub at: i64,
     pub inventory: Inventory,
-    #[serde(default)]
     pub runtime_release: String,
     pub checks: Vec<Check>,
 }
@@ -190,22 +185,11 @@ pub async fn overview(context: &Context) -> Result<Overview, ServiceError> {
 }
 
 pub async fn assessment(context: &Context) -> Result<Option<Assessment>, ServiceError> {
-    progress::read_document(context.db(), DOCUMENT)
-        .await?
-        .map(|text| {
-            serde_json::from_str(&text)
-                .map_err(|e| ServiceError::internal("models", format!("The last evaluation could not be read: {e}")))
-        })
-        .transpose()
+    Ok(super::model_assessment::read(context.db()).await?)
 }
 
 async fn save(context: &Context, assessment: &Assessment) -> Result<(), ServiceError> {
-    progress::save_document(
-        context.db(),
-        DOCUMENT,
-        &serde_json::to_string(assessment).expect("serializable assessment"),
-    )
-    .await?;
+    super::model_assessment::save(context.db(), assessment).await?;
     Ok(())
 }
 

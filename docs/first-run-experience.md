@@ -214,6 +214,12 @@ Then repeat distribution-specific acceptance on Ubuntu, Fedora and openSUSE.
 The repository now implements a six-stage setup UI with saved stage/choices,
 explicit completion, search/source configuration, optional first scan and manual
 scheduling. Existing databases are grandfathered in by migration 0018.
+Migration 0019 converts the earlier JSON records into typed `onboarding` and
+`model_assessments` columns, with per-task measurements in `model_checks`, and
+removes `app_state`. Schema migrations track storage changes; the assessment's
+evaluation version identifies the test criteria, not the storage format.
+Constraints enforce flags, step ranges and complete optional GPU information.
+Assessment metadata and its child checks are saved in one transaction.
 
 Models in the main navigation shows actual per-task routing, local alternatives,
 rationales, downloaded status and saved smoke-check results. Evaluate again is

@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT evaluation_version, assessed_at, memory_bytes, gpu_name, gpu_vendor,\n       gpu_vram_bytes, runtime_release\nFROM model_assessments WHERE id = 1\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "evaluation_version",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "evaluation_version"
+          }
+        }
+      },
+      {
+        "name": "assessed_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "assessed_at"
+          }
+        }
+      },
+      {
+        "name": "memory_bytes",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "memory_bytes"
+          }
+        }
+      },
+      {
+        "name": "gpu_name",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "gpu_name"
+          }
+        }
+      },
+      {
+        "name": "gpu_vendor",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "gpu_vendor"
+          }
+        }
+      },
+      {
+        "name": "gpu_vram_bytes",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "gpu_vram_bytes"
+          }
+        }
+      },
+      {
+        "name": "runtime_release",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_assessments",
+            "name": "runtime_release"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "383d328d1640ebbb471c97608e3db768328b252ba33a6582f802c6000ed8cedc"
+}

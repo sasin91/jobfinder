@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO model_assessments\n  (id, evaluation_version, assessed_at, memory_bytes, gpu_name, gpu_vendor, gpu_vram_bytes, runtime_release)\nVALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)\nON CONFLICT (id) DO UPDATE SET\n  evaluation_version = excluded.evaluation_version,\n  assessed_at = excluded.assessed_at,\n  memory_bytes = excluded.memory_bytes,\n  gpu_name = excluded.gpu_name,\n  gpu_vendor = excluded.gpu_vendor,\n  gpu_vram_bytes = excluded.gpu_vram_bytes,\n  runtime_release = excluded.runtime_release\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "8a4d7fc829216866f6b1316b5aa67b9c3306303209eb760340a24d747f728fce"
+}
