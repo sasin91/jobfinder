@@ -222,21 +222,19 @@ async fn prepare_llama_models(server: &LlamaServer, files: &BTreeSet<String>) ->
             })
         })
         .collect::<Result<_, _>>()?;
+    let folder = server.models_folder();
     let remaining = missing
         .iter()
-        .map(|m| download::remaining_bytes(&m.url(), &server.models_folder().join(m.file), m.bytes))
+        .map(|m| download::remaining_bytes(&m.url(), &folder.join(m.file), m.bytes))
         .sum();
-    download::ensure_space(&server.models_folder(), remaining)
-        .map_err(|e| ServiceError::failed("models/storage", e))?;
+    download::ensure_space(&folder, remaining).map_err(|e| ServiceError::failed("models/storage", e))?;
     if server.server_path().is_none() {
         download::download_server(server.folder(), &server.inventory(), &server.downloads)
             .await
             .map_err(|e| ServiceError::failed("models/runtime", e))?;
+        download::ensure_space(&folder, remaining).map_err(|e| ServiceError::failed("models/storage", e))?;
     }
-    for model in missing {
-        download::download_model(model, &server.models_folder(), &server.downloads)
-            .await
-            .map_err(|e| ServiceError::failed("models/download", e))?;
-    }
-    Ok(())
+    download::download_models(&missing, &folder, &server.downloads)
+        .await
+        .map_err(|e| ServiceError::failed("models/download", e))
 }

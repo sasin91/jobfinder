@@ -464,7 +464,7 @@ pub fn preparation_status(state: &State) -> Option<(Health, String)> {
                 .filter(|download| download.running)
                 .and_then(|download| download.percent);
             let label = match percent {
-                Some(percent) => format!("Downloading models · {percent}% of current file"),
+                Some(percent) => format!("Preparing models · {percent}%"),
                 None => "Preparing models…".into(),
             };
             (Health::Neutral, label)

@@ -1,7 +1,6 @@
 //! The setup wizard's downloads: the platform's llama.cpp build for this computer's graphics
 //! card, from its GitHub releases, installed into the llama folder; and a catalog model into the
-//! models folder. One download runs at a time, in the background, and Downloads says how far it
-//! is for the page to show.
+//! models folder. Downloads tracks one operation at a time, including batches of model files.
 //!
 //! A file is written as name.part and renamed when it is whole, so a broken download never looks
 //! like a model or a server.
@@ -12,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -45,6 +45,8 @@ const STAGING_FOLDER: &str = ".llama-cpp-download";
 
 /// The suffix of a file being downloaded.
 const PART_SUFFIX: &str = ".part";
+
+const PARALLEL_MODEL_DOWNLOADS: usize = 3;
 
 /// A release file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -479,6 +481,55 @@ pub async fn download_model(model: &CatalogModel, models_folder: &Path, download
     Ok(())
 }
 
+/// Downloads the distinct missing models within a single preparation turn.
+pub(crate) async fn download_models(
+    models: &[&CatalogModel],
+    folder: &Path,
+    downloads: &Downloads,
+) -> Result<(), String> {
+    if models.is_empty() {
+        return Ok(());
+    }
+    let files: Vec<_> = models
+        .iter()
+        .map(|model| (model.url(), folder.join(model.file)))
+        .collect();
+    download_model_files(&client()?, &files, downloads).await
+}
+
+async fn download_model_files(
+    client: &reqwest::Client,
+    files: &[(String, PathBuf)],
+    downloads: &Downloads,
+) -> Result<(), String> {
+    let progress = Mutex::new(vec![(0, None); files.len()]);
+    downloads.set_bytes(0, None);
+    let transfers = stream::iter((0..files.len()).map(|index| {
+        let progress = &progress;
+        async move {
+            let (url, to) = &files[index];
+            download_file_reporting(client, url, to, |done, total| {
+                let mut progress = progress.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                progress[index] = (done, total);
+                downloads.set_bytes(
+                    progress.iter().map(|(done, _)| done).sum(),
+                    progress.iter().map(|(_, total)| *total).sum(),
+                );
+            })
+            .await
+            .map_err(|why| format!("{}: {why}", to.display()))
+        }
+    }))
+    .buffer_unordered(PARALLEL_MODEL_DOWNLOADS);
+    // A failed transfer leaves its partial file for retry while the other models can finish.
+    let failures: Vec<_> = transfers.filter_map(|result| async { result.err() }).collect().await;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
+}
+
 /// url's body into to, through to.part, counting bytes into downloads. Paused in the task
 /// manager, it lets go of the connection (a server ends one that waits long) between two chunks,
 /// and on resume asks for the rest (an HTTP range), or for all of it again when the server can't
@@ -488,6 +539,15 @@ pub(crate) async fn download_file(
     url: &str,
     to: &Path,
     downloads: &Downloads,
+) -> Result<(), String> {
+    download_file_reporting(client, url, to, |done, total| downloads.set_bytes(done, total)).await
+}
+
+async fn download_file_reporting(
+    client: &reqwest::Client,
+    url: &str,
+    to: &Path,
+    report: impl Fn(u64, Option<u64>),
 ) -> Result<(), String> {
     // Paused before this file (between two of a build's zips): it waits to be resumed first.
     running_work::until_resumed().await;
@@ -524,7 +584,7 @@ pub(crate) async fn download_file(
         .await
         .map_err(|e| format!("Couldn't write {}: {e}", part.display()))?;
     file.seek(io::SeekFrom::Start(done)).await.map_err(|e| e.to_string())?;
-    downloads.set_bytes(done, total);
+    report(done, total);
     loop {
         // All of it came already: the end is read from this answer, paused or not.
         let all_in = total.is_some_and(|total| done >= total);
@@ -557,7 +617,7 @@ pub(crate) async fn download_file(
                 total = response.content_length();
                 version = version_of(&response);
                 write_resume(&metadata, url, version.as_ref())?;
-                downloads.set_bytes(done, total);
+                report(done, total);
             }
         }
         let Some(piece) = response
@@ -571,7 +631,7 @@ pub(crate) async fn download_file(
             .await
             .map_err(|e| format!("Couldn't write {}: {e}", part.display()))?;
         done += piece.len() as u64;
-        downloads.set_bytes(done, total);
+        report(done, total);
     }
     file.flush()
         .await
@@ -594,6 +654,7 @@ pub(crate) async fn download_file(
         .await
         .map_err(|e| format!("Couldn't move {} to {}: {e}", part.display(), to.display()))?;
     let _ = std::fs::remove_file(metadata);
+    report(done, Some(done));
     Ok(())
 }
 
@@ -898,6 +959,56 @@ mod tests {
                 & 0o111,
             0
         );
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_downloads_overlap_and_a_failed_file_does_not_discard_a_success() {
+        use axum::{Router, extract::Path as RoutePath, routing::get};
+
+        let both_requested = Arc::new(tokio::sync::Barrier::new(2));
+        let app = Router::new().route(
+            "/{name}",
+            get(move |RoutePath(name): RoutePath<String>| {
+                let both_requested = Arc::clone(&both_requested);
+                async move {
+                    both_requested.wait().await;
+                    if name == "good" { "GGUF model" } else { "bad file" }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let folder = std::env::temp_dir().join(format!("jobfinder-parallel-models-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let files = [
+            (format!("http://{address}/good"), folder.join("good.gguf")),
+            (format!("http://{address}/bad"), folder.join("bad.gguf")),
+        ];
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let downloads = Downloads::default();
+        let turn = downloads.begin_turn("Preparing task models").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            download_model_files(&client, &files, &downloads),
+        )
+        .await
+        .expect("the server answers only once both requests arrive");
+        assert!(result.as_ref().unwrap_err().contains("bad.gguf"));
+        assert_eq!(std::fs::read_to_string(&files[0].1).unwrap(), "GGUF model");
+        assert!(!files[1].1.exists());
+        assert!(part_path(&files[1].1).exists());
+        assert!(matches!(
+            downloads.progress(),
+            Progress::Running {
+                done_bytes: 18,
+                total_bytes: Some(18),
+                ..
+            }
+        ));
+        turn.end(result);
+        task.abort();
         std::fs::remove_dir_all(folder).unwrap();
     }
 
