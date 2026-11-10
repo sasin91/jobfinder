@@ -3,12 +3,14 @@
 use std::cell::Cell;
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::mpsc::Sender;
 
 use iced::theme::Mode;
 use iced::widget::{column, container, row, text};
 use iced::{Center, Element, Fill, Size, Subscription, Task};
 use tokio::task::JoinHandle;
 
+use crate::app_update::Staged;
 use crate::dashboard::Health;
 
 use super::{GAP, Launch, PADDING, Shell, TITLE, back_button, boot, drawings, style, window_settings, with_fonts};
@@ -31,7 +33,7 @@ enum Message {
 }
 
 /// Opens the splash and switches to the app in the same window once startup finishes.
-pub fn run(startup: JoinHandle<Result<Launch, String>>) -> Result<ExitCode, iced::Error> {
+pub fn run(startup: JoinHandle<Result<Launch, String>>, staged: Sender<Staged>) -> Result<ExitCode, iced::Error> {
     let startup = Cell::new(Some(startup));
     let failed = Rc::new(Cell::new(false));
     let startup_failed = Rc::clone(&failed);
@@ -55,7 +57,7 @@ pub fn run(startup: JoinHandle<Result<Launch, String>>) -> Result<ExitCode, iced
                 Task::batch([load, iced::system::theme().map(Message::ThemeMode)]),
             )
         },
-        move |window: &mut Window, message| update(window, message, &startup_failed),
+        move |window: &mut Window, message| update(window, message, &startup_failed, &staged),
         view,
     )
     .title(TITLE)
@@ -77,10 +79,10 @@ pub fn run(startup: JoinHandle<Result<Launch, String>>) -> Result<ExitCode, iced
     })
 }
 
-fn update(window: &mut Window, message: Message, failed: &Cell<bool>) -> Task<Message> {
+fn update(window: &mut Window, message: Message, failed: &Cell<bool>, staged: &Sender<Staged>) -> Task<Message> {
     match message {
         Message::Started(Ok(launch)) => {
-            let (shell, tasks) = boot(launch);
+            let (shell, tasks) = boot(launch, staged.clone());
             window.phase = Phase::Ready(Box::new(shell));
             return tasks.map(Message::Shell);
         }

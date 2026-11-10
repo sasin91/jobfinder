@@ -61,6 +61,9 @@ encoding_rs = "0.8"
 sha1 = "0.10"
 # The shipped taxonomy index's sha256, which says when to write it into the database again.
 sha2 = "0.10"
+# The app updater compares release versions and stages downloads beside the running program.
+semver = "1"
+tempfile = "3"
 # The llama.cpp release the setup wizard downloads, unzipped into the llama folder.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"

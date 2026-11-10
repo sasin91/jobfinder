@@ -12,6 +12,10 @@ Take the newest [release](https://github.com/sasin91/jobfinder/releases/latest):
 keep the file where you like and double-click it. The release notes say what Windows may ask the
 first time. The rest of this README is for building and developing it.
 
+JobFinder checks for updates on launch and every six hours while open. **Settings** shows when an
+update is available and lets you check manually. **Update and restart** downloads and verifies
+the release, replaces the program file, and opens JobFinder again.
+
 ## What is here
 
 | Folder | What |

@@ -3,8 +3,8 @@
 use iced::widget::{Column, button, column, container, row, space, text};
 use iced::{Center, Element, Fill};
 
-use super::style;
 use super::{GAP, Message, Screen};
+use super::{style, updates};
 use crate::context::Context;
 
 /// The padding inside a card.
@@ -45,7 +45,7 @@ const PAGES: [(&str, &str, Screen); 7] = [
     ),
 ];
 
-pub fn view(context: &Context) -> Element<'_, Message> {
+pub fn view<'a>(context: &'a Context, update: &'a updates::State) -> Element<'a, Message> {
     let mut pages = Column::new();
     for (index, (label, note, screen)) in PAGES.iter().enumerate() {
         if index > 0 {
@@ -72,6 +72,7 @@ pub fn view(context: &Context) -> Element<'_, Message> {
                 .style(style::secondary),
         ]
         .spacing(4),
+        updates::view(update).map(Message::Update),
         container(pages).width(Fill).style(style::card),
         text("Your data").font(style::semibold()).size(style::SECTION_SIZE),
         container(data).width(Fill).style(style::card),

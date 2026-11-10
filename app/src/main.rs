@@ -45,7 +45,7 @@ use jobfinder::server::{self, AppState};
 use jobfinder::taxonomy::Taxonomy;
 use jobfinder::taxonomy_store;
 use jobfinder::whisper::{self, Whisper};
-use jobfinder::{cleanup, db, desktop, extension};
+use jobfinder::{app_update, cleanup, db, desktop, extension};
 
 /// Options of the web pages, which are gone: a shortcut or login task that still gives one starts
 /// the window anyway, and the log says the option is ignored.
@@ -69,6 +69,11 @@ fn main() -> ExitCode {
         }
         Some("scan") => run_scan(&args[1..]),
         Some("cleanup") => run_cleanup(&args[1..]),
+        #[cfg(windows)]
+        Some(app_update::FINISH_UPDATE) => match app_update::finish_windows_update() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(why) => update_failed(why),
+        },
         Some(jobfinder::pdf_text::child::SUBCOMMAND) => jobfinder::pdf_text::child::run(),
         _ => run_server(&args),
     }
@@ -494,15 +499,34 @@ fn run_server(args: &[String]) -> ExitCode {
     let handle = runtime.handle().clone();
     let startup =
         runtime.spawn_blocking(move || start_services(handle, port, &database, laya_folder, llama_folder, remember));
-    let shown = desktop::run(startup);
+    let (staged, update) = std::sync::mpsc::channel();
+    let shown = desktop::run(startup, staged);
     runtime.shutdown_timeout(SHUTDOWN_WAIT);
+    drop(_held);
     match shown {
+        Ok(ExitCode::SUCCESS) => match update.try_recv() {
+            Ok(staged) => match staged.apply() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(why) => update_failed(why),
+            },
+            Err(_) => ExitCode::SUCCESS,
+        },
         Ok(code) => code,
         Err(e) => {
             jobfinder::log_line!("The window couldn't open: {e}.");
             ExitCode::FAILURE
         }
     }
+}
+
+fn update_failed(why: String) -> ExitCode {
+    jobfinder::log_line!("{why}");
+    rfd::MessageDialog::new()
+        .set_title("JobFinder update")
+        .set_level(rfd::MessageLevel::Error)
+        .set_description(why)
+        .show();
+    ExitCode::FAILURE
 }
 
 /// Prepares the app and its servers on a worker while the desktop window shows the splash.

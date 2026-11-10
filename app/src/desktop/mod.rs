@@ -30,10 +30,12 @@ mod startup;
 mod style;
 mod task_manager;
 mod taxonomy_screen;
+mod updates;
 mod widgets;
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use iced::futures::Stream;
@@ -43,6 +45,7 @@ use iced::{Center, Element, Fill, Size, Task};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
+use crate::app_update::Staged;
 use crate::context::Context;
 use crate::dashboard::{self, Dashboard, Findings, Health, Work};
 use crate::game_mode::Playing;
@@ -61,6 +64,8 @@ const MIN_WINDOW_SIZE: Size = Size::new(560.0, 420.0);
 /// How often the Match screen reads its status again, so a scan or a post the Jobnet extension
 /// sent shows without a click.
 const RELOAD_EVERY: Duration = Duration::from_secs(30);
+/// How often JobFinder checks GitHub while the window is open.
+const CHECK_UPDATES_EVERY: Duration = Duration::from_hours(6);
 /// Space between blocks on a screen.
 const GAP: f32 = 12.0;
 /// The window's padding.
@@ -131,6 +136,8 @@ pub struct Shell {
     extension: extension_screen::State,
     devices: devices_screen::State,
     notifications: notification_drawer::State,
+    updates: updates::State,
+    staged_update: Sender<Staged>,
     /// The notification drawer is open over the bottom of the screen.
     drawer_open: bool,
     /// The places left, for the mouse's back button.
@@ -161,6 +168,7 @@ pub enum Message {
     Extension(extension_screen::Msg),
     Devices(devices_screen::Msg),
     Notifications(notification_drawer::Msg),
+    Update(updates::Msg),
     /// The bell was clicked: the drawer opens, or closes when open.
     ToggleDrawer,
     /// A system notification was clicked: its link, which the window comes up on.
@@ -182,14 +190,24 @@ fn window_settings() -> iced::window::Settings {
     }
 }
 
-fn boot(launch: Launch) -> (Shell, Task<Message>) {
+fn boot(launch: Launch, staged_update: Sender<Staged>) -> (Shell, Task<Message>) {
     let Launch {
         context,
         runtime,
         show_setup,
         front,
     } = launch;
-    let ticks = ticks(&runtime);
+    let reload_ticks = ticks(&runtime, RELOAD_EVERY);
+    let check_for_updates = if crate::app_update::supported() {
+        Task::batch([
+            Task::done(Message::Update(updates::Msg::Check)),
+            Task::run(received(ticks(&runtime, CHECK_UPDATES_EVERY)), |()| {
+                Message::Update(updates::Msg::Check)
+            }),
+        ])
+    } else {
+        Task::none()
+    };
     let clicks = notification_clicks(&context);
     let detected = context.game_mode.detected();
     let detected_game = detected.borrow().clone();
@@ -210,6 +228,8 @@ fn boot(launch: Launch) -> (Shell, Task<Message>) {
         extension: extension_screen::State::default(),
         devices: devices_screen::State::default(),
         notifications: notification_drawer::State::default(),
+        updates: updates::State::default(),
+        staged_update,
         unread: 0,
         drawer_open: false,
         history: history::History::new(),
@@ -217,7 +237,8 @@ fn boot(launch: Launch) -> (Shell, Task<Message>) {
     let tasks = Task::batch([
         Task::done(Message::Reload),
         Task::run(received(front), |()| Message::Front),
-        Task::run(received(ticks), |()| Message::Reload),
+        Task::run(received(reload_ticks), |()| Message::Reload),
+        check_for_updates,
         Task::run(received(clicks), Message::NotificationClicked),
         Task::run(
             iced::futures::stream::unfold(detected, |mut detected| async {
@@ -236,12 +257,12 @@ fn boot(launch: Launch) -> (Shell, Task<Message>) {
     (shell, tasks)
 }
 
-/// A tick every RELOAD_EVERY, from a timer on the runtime (iced's own executor has no timers).
-fn ticks(runtime: &Handle) -> UnboundedReceiver<()> {
+/// A periodic tick from the app runtime (iced's own executor has no timers).
+fn ticks(runtime: &Handle, every: Duration) -> UnboundedReceiver<()> {
     let (sender, receiver) = unbounded_channel();
     runtime.spawn(async move {
         loop {
-            tokio::time::sleep(RELOAD_EVERY).await;
+            tokio::time::sleep(every).await;
             if sender.send(()).is_err() {
                 break;
             }
@@ -635,6 +656,10 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
             let runner = shell.runner();
             return devices_screen::update(&mut shell.devices, msg, &runner).map(Message::Devices);
         }
+        Message::Update(msg) => {
+            let runner = shell.runner();
+            return updates::update(&mut shell.updates, msg, &runner, &shell.staged_update).map(Message::Update);
+        }
         Message::OpenPage(path) => {
             if let Some(place) = place_for(&path) {
                 return go_to(shell, place);
@@ -726,7 +751,7 @@ fn view(shell: &Shell) -> Element<'_, Message> {
         Screen::LocalModel => local_model::view(&shell.setup.models).map(Message::LocalModel),
         Screen::JobSearches => job_searches::view(&shell.job_searches).map(Message::JobSearches),
         Screen::TaskManager => task_manager::view(&shell.task_manager).map(Message::TaskManager),
-        Screen::Settings => settings_screen::view(&shell.context),
+        Screen::Settings => settings_screen::view(&shell.context, &shell.updates),
         Screen::Taxonomy => taxonomy_screen::view(&shell.taxonomy).map(Message::Taxonomy),
         Screen::Setup => setup_screen::view(&shell.setup).map(Message::Setup),
         Screen::JoblogExtension => extension_screen::view(&shell.extension, &shell.context).map(Message::Extension),
@@ -830,6 +855,11 @@ const STRIP_SIZE: Size = Size::new(3.0, 16.0);
 /// The app's name and its screens, as Windows 11's Settings has them.
 fn sidebar(shell: &Shell) -> Element<'static, Message> {
     let current = shell.screen;
+    let settings = if shell.updates.has_update() {
+        "Settings · Update available"
+    } else {
+        "Settings"
+    };
     column![
         container(text(TITLE).font(style::title_font()).size(style::SECTION_SIZE)).padding([8.0, 12.0]),
         nav_item("Match", Screen::Match, current),
@@ -839,7 +869,7 @@ fn sidebar(shell: &Shell) -> Element<'static, Message> {
         nav_item("Job searches", Screen::JobSearches, current),
         nav_item("Task manager", Screen::TaskManager, current),
         nav_item("Setup", Screen::Setup, current),
-        nav_item("Settings", Screen::Settings, current),
+        nav_item(settings, Screen::Settings, current),
         space().height(Fill),
         game_mode_button(shell.context.game_mode.manual(), shell.detected_game.is_some()),
     ]
@@ -1037,12 +1067,15 @@ mod tests {
             Arc::new(Context::new(db, taxonomy, KeyVault::with_key_in_memory()))
         });
         let (_front, front) = unbounded_channel();
-        let (shell, _) = boot(Launch {
-            context,
-            runtime: runtime.handle().clone(),
-            show_setup: false,
-            front,
-        });
+        let (shell, _) = boot(
+            Launch {
+                context,
+                runtime: runtime.handle().clone(),
+                show_setup: false,
+                front,
+            },
+            std::sync::mpsc::channel().0,
+        );
         (shell, runtime)
     }
 

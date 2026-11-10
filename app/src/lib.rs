@@ -4,6 +4,7 @@
 pub mod account;
 pub mod api_error;
 pub mod app_log;
+pub mod app_update;
 pub mod cleanup;
 pub mod context;
 pub mod dashboard;
