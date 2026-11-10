@@ -388,7 +388,7 @@ fn folder_picker(state: &State) -> Element<'_, Msg> {
     let view = match &state.view {
         Some(Ok(view)) => view,
         Some(Err(why)) => return widgets::message_bar(Health::Attention, why.as_str()),
-        None => return widgets::caption("Reading the models folder…").into(),
+        None => return widgets::caption("Reading the models folder…"),
     };
     let mut body = column![
         text(view.models_folder.as_str()).size(style::BODY_SIZE),
