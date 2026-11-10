@@ -1,11 +1,11 @@
 JobFinder checks the job sites for you while your PC is on, matches each post with your CV, and starts the application. Free and open source (BSD 2-Clause).
 
-## New in 0.1.2
+## New in 0.1.3
 
-- **Resumable setup.** Review your models, import your CV, set up your first job search, and try a short scan before choosing a schedule. JobFinder saves your place and keeps your existing models, profile, searches, and matches when you upgrade.
-- **Models by task.** See recommendations and choose which model handles each task directly in Setup. JobFinder automatically downloads selected local models, shares downloads across tasks, and can run a local check on a downloaded model.
-- **Model download recovery.** See download progress and resume interrupted downloads when the source supports it. JobFinder checks available disk space before downloading.
-- **Job searches.** Set your location and remote preference, choose job sites individually, and save the search by continuing to the next step. Signed-in sites and automatic application drafting start disabled for new searches created in setup.
+- **Startup screen.** See JobFinder's progress while the desktop app opens.
+- **Storage and model downloads.** Choose where to keep your data and models during setup. Local model downloads continue in the background while you work through setup, with progress in the status bar.
+- **Setup progress and CV privacy.** See which setup steps are still pending from the dashboard. The dashboard and setup explain when a hosted provider, remote model server, or cloud fallback can receive your CV and profile data.
+- **Direct website downloads.** The JobFinder website offers the latest Windows and Linux builds directly and selects a download for your desktop platform when it can.
 
 ## Download
 
@@ -20,7 +20,7 @@ JobFinder checks the job sites for you while your PC is on, matches each post wi
 
 ## The first start
 
-JobFinder opens on **Set up JobFinder**. It shows where your data lives, then guides you through model selection, CV import, and your first job search. You can try or skip the first scan, then choose automatic checks or manual scanning before finishing.
+JobFinder opens on **Set up JobFinder**. Choose where to keep your files, then follow the steps to select models, import your CV, and save your first job search. You can try or skip the first scan, then choose automatic checks or manual scanning before finishing.
 
 The Jobnet extension for Edge or Chrome is under Settings, Jobnet extension.
 
