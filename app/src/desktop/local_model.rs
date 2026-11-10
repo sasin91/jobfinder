@@ -11,7 +11,7 @@ use iced::{Center, Element, Fill, Task};
 
 use super::style;
 use super::widgets::{self, CARD_PADDING, ROW_PADDING};
-use super::{GAP, Runner};
+use super::{GAP, Runner, Step};
 use crate::account::llama_setup_service::{self, CatalogRow, LlamaSetupView};
 use crate::account::model_plan;
 use crate::dashboard::Health;
@@ -32,6 +32,7 @@ pub struct State {
     /// A reload is on its way, so a download's progress isn't asked for twice.
     polling: bool,
     busy: bool,
+    folder_move: Option<String>,
     preparation: Option<Preparation>,
     choices: BTreeMap<&'static str, String>,
     /// Persisted choices (or fresh recommendations) that the pending edits started from.
@@ -110,8 +111,9 @@ pub enum Msg {
     UseModel(&'static str),
     /// Asks for a folder and moves the models there.
     MoveModels,
-    /// The folder dialog was closed without a folder.
-    NoFolder,
+    MoveProgress(String),
+    /// None means the folder dialog was cancelled.
+    ModelsMoved(Result<Option<String>, String>),
     /// What a click came to; a reload follows.
     Said(Result<String, String>),
     /// The next look at a running download.
@@ -258,10 +260,10 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             if working(state) {
                 return Task::none();
             }
-            state.busy = true;
-            state.said = Some((Health::Neutral, "Pick the folder to keep the models in…".to_string()));
-            return runner.run(
-                |context| async move {
+            state.said = None;
+            state.folder_move = Some("Pick the folder to keep the models in…".into());
+            return runner.run_saying(
+                |context, report| async move {
                     let Some(folder) = rfd::AsyncFileDialog::new()
                         .set_title("Choose the folder to keep the models in")
                         .pick_folder()
@@ -269,20 +271,30 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                     else {
                         return Ok(None);
                     };
-                    llama_setup_service::move_models(&context, folder.path().to_path_buf())
+                    report("Preparing to move models…");
+                    llama_setup_service::move_models(&context, folder.path().to_path_buf(), move |line| report(line))
                         .await
                         .map(Some)
                 },
-                |answer| match answer.and_then(|moved| moved.map_err(|e| e.message)) {
-                    Ok(None) => Msg::NoFolder,
-                    Ok(Some(said)) => Msg::Said(Ok(said)),
-                    Err(why) => Msg::Said(Err(why)),
+                |step| match step {
+                    Step::Said(progress) => Msg::MoveProgress(progress),
+                    Step::Done(answer) => Msg::ModelsMoved(answer.and_then(|moved| moved.map_err(|e| e.message))),
                 },
             );
         }
-        Msg::NoFolder => {
-            state.busy = false;
-            state.said = None;
+        Msg::MoveProgress(progress) => {
+            if let Some(status) = &mut state.folder_move {
+                *status = progress;
+            }
+        }
+        Msg::ModelsMoved(result) => {
+            state.folder_move = None;
+            state.said = match result {
+                Ok(None) => return Task::none(),
+                Ok(Some(message)) => Some((Health::Ready, message)),
+                Err(why) => Some((Health::Attention, why)),
+            };
+            return Task::done(Msg::Load);
         }
         // The shell goes on.
         Msg::ModelInUse { .. } => state.busy = false,
@@ -324,7 +336,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         }
         Some(Ok(view)) => view,
     };
-    let busy = state.busy || view.busy;
+    let busy = working(state);
     if let Some(plan) = &view.plan {
         screen = screen.push(plan_card(state, view, plan, busy));
     }
@@ -378,15 +390,18 @@ fn folder_picker(state: &State) -> Element<'_, Msg> {
         Some(Err(why)) => return widgets::message_bar(Health::Attention, why.as_str()),
         None => return widgets::caption("Reading the models folder…").into(),
     };
-    column![
+    let mut body = column![
         text(view.models_folder.as_str()).size(style::BODY_SIZE),
         widgets::caption("New models download here. If you choose another folder, existing model files move with you."),
         button(text("Choose another folder…").size(style::BODY_SIZE))
             .style(style::standard_button)
             .on_press_maybe((!working(state)).then_some(Msg::MoveModels)),
     ]
-    .spacing(6)
-    .into()
+    .spacing(6);
+    if let Some(progress) = &state.folder_move {
+        body = body.push(widgets::caption(progress.as_str()));
+    }
+    body.into()
 }
 
 /// The same task choices used in Models, without the catalog and folder-management sections.
@@ -425,7 +440,7 @@ pub fn setup_view(state: &State) -> Element<'_, Msg> {
 }
 
 pub fn working(state: &State) -> bool {
-    state.busy || state.view.as_ref().is_some_and(|v| v.as_ref().is_ok_and(|v| v.busy))
+    state.busy || state.folder_move.is_some() || state.view.as_ref().is_some_and(|v| v.as_ref().is_ok_and(|v| v.busy))
 }
 
 /// Saved assignments let the user continue before their local files are ready.
@@ -859,6 +874,24 @@ mod tests {
             .iter()
             .map(|(task, file)| (task.to_string(), file.clone()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn folder_move_stays_busy_until_its_own_result() {
+        let runner = runner().await;
+        let mut state = State {
+            folder_move: Some("Preparing to move models…".into()),
+            ..State::default()
+        };
+        let progress = "Moving model 1 of 2 · first.gguf";
+        let _ = update(&mut state, Msg::MoveProgress(progress.into()), &runner);
+        let _ = update(&mut state, Msg::Said(Ok("Other work completed".into())), &runner);
+        assert_eq!(state.folder_move.as_deref(), Some(progress));
+        assert!(working(&state));
+
+        let _ = update(&mut state, Msg::ModelsMoved(Err("Transfer failed".into())), &runner);
+        assert!(!working(&state));
+        assert_eq!(state.said, Some((Health::Attention, "Transfer failed".into())));
     }
 
     #[tokio::test]

@@ -181,7 +181,11 @@ impl LlamaServer {
     /// Moves the models to the folder to and runs them from there from now on; says how many
     /// moved. Not while a model downloads; the server is stopped first, as a running model's
     /// file can't be moved on Windows (the next call starts it again).
-    pub async fn move_models(&self, to: PathBuf) -> Result<usize, String> {
+    pub async fn move_models(
+        &self,
+        to: PathBuf,
+        report: impl FnMut(&std::ffi::OsStr, usize, usize) + Send + 'static,
+    ) -> Result<usize, String> {
         let _no_task_download = self.fetching.lock().await;
         let _no_download = self.downloads.begin_move()?;
         let from = self.models_folder();
@@ -191,7 +195,7 @@ impl LlamaServer {
         self.stop_now().await;
         let llama_folder = self.folder.clone();
         let target = to.clone();
-        let moved = tokio::task::spawn_blocking(move || models_folder::move_to(&llama_folder, &from, &target))
+        let moved = tokio::task::spawn_blocking(move || models_folder::move_to(&llama_folder, &from, &target, report))
             .await
             .map_err(|e| format!("Moving the models stopped: {e}"))??;
         *self

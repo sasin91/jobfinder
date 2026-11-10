@@ -168,10 +168,16 @@ pub async fn download_if_missing(context: &Context, file: &str) -> Result<(), Se
 
 /// Moves the models to the folder to (a bigger disk, say) and keeps them there from now on;
 /// says how it went.
-pub async fn move_models(context: &Context, to: std::path::PathBuf) -> Result<String, ServiceError> {
+pub async fn move_models(
+    context: &Context,
+    to: std::path::PathBuf,
+    mut report: impl FnMut(&str) + Send + 'static,
+) -> Result<String, ServiceError> {
     let server = server_of(context)?;
     let moved = server
-        .move_models(to.clone())
+        .move_models(to.clone(), move |file, index, total| {
+            report(&format!("Moving model {index} of {total} · {}", file.to_string_lossy()));
+        })
         .await
         .map_err(|why| ServiceError::internal("llama_setup (move models)", why))?;
     let models = if moved == 1 { "model" } else { "models" };

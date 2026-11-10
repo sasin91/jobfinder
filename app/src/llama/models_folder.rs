@@ -7,6 +7,7 @@
 //! same disk, else copied (through name.part, so a broken copy never looks like a model) and the
 //! original removed once every file is across. A failure puts back what was moved.
 
+use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -51,13 +52,20 @@ fn write(llama_folder: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Moves every model in from to the folder to, then keeps to as the models folder; says how many
-/// models moved. Blocking: run it on a blocking thread.
-pub fn move_to(llama_folder: &Path, from: &Path, to: &Path) -> Result<usize, String> {
+/// models moved. Reports the file name, one-based position and total before each file is moved.
+/// Blocking: run it on a blocking thread.
+pub fn move_to(
+    llama_folder: &Path,
+    from: &Path,
+    to: &Path,
+    mut report: impl FnMut(&OsStr, usize, usize),
+) -> Result<usize, String> {
     std::fs::create_dir_all(to).map_err(|e| format!("Couldn't make {}: {e}", to.display()))?;
     let files = models_in(from).map_err(|e| format!("Couldn't read {}: {e}", from.display()))?;
     let mut moved = Vec::new();
-    for file in &files {
-        let target = to.join(file.file_name().unwrap_or_default());
+    for (index, file) in files.iter().enumerate() {
+        let name = file.file_name().unwrap_or_default();
+        let target = to.join(name);
         if target.exists() {
             put_back(&moved);
             return Err(format!(
@@ -66,6 +74,7 @@ pub fn move_to(llama_folder: &Path, from: &Path, to: &Path) -> Result<usize, Str
                 target.display()
             ));
         }
+        report(name, index + 1, files.len());
         match move_file(file, &target) {
             Ok(how) => moved.push((file.clone(), target, how)),
             Err(e) => {
@@ -174,13 +183,20 @@ mod tests {
         assert_eq!(read(&llama), from, "the default without a setting");
 
         let to = llama.join("big disk");
-        assert_eq!(move_to(&llama, &from, &to), Ok(1));
+        let mut progress = Vec::new();
+        assert_eq!(
+            move_to(&llama, &from, &to, |name, index, total| {
+                progress.push((name.to_os_string(), index, total));
+            }),
+            Ok(1)
+        );
+        assert_eq!(progress, vec![("a.gguf".into(), 1, 1)]);
         assert_eq!(std::fs::read(to.join("a.gguf")).unwrap(), b"a");
         assert!(!from.join("a.gguf").exists());
         assert!(from.join("notes.txt").exists(), "only models move");
         assert_eq!(read(&llama), to);
 
-        assert_eq!(move_to(&llama, &to, &from), Ok(1));
+        assert_eq!(move_to(&llama, &to, &from, |_, _, _| {}), Ok(1));
         assert!(!llama.join(SETTING_FILE).exists(), "back to the default");
         assert_eq!(read(&llama), from);
     }
@@ -196,7 +212,7 @@ mod tests {
         std::fs::create_dir_all(&to).unwrap();
         std::fs::write(to.join("b.gguf"), b"theirs").unwrap();
 
-        assert!(move_to(&llama, &from, &to).is_err());
+        assert!(move_to(&llama, &from, &to, |_, _, _| {}).is_err());
         assert!(from.join("a.gguf").exists() && from.join("b.gguf").exists());
         assert!(!to.join("a.gguf").exists());
         assert_eq!(std::fs::read(to.join("b.gguf")).unwrap(), b"theirs");
