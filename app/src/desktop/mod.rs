@@ -26,17 +26,17 @@ mod notification_drawer;
 mod recordings_card;
 mod settings_screen;
 mod setup_screen;
+mod startup;
 mod style;
 mod task_manager;
 mod taxonomy_screen;
 mod widgets;
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::futures::Stream;
-use iced::theme::Mode;
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{Column, Row, button, column, container, row, scrollable, space, stack, text, tooltip};
 use iced::{Center, Element, Fill, Size, Task};
@@ -50,12 +50,12 @@ use crate::job_scan::scan_service;
 use crate::laya::laya_client::LayaState;
 use crate::notifications::notification_model;
 
+pub use startup::{run, show_failure};
+
 /// The window's title.
 const TITLE: &str = "JobFinder";
 /// The window's size when it opens, in logical pixels.
 const WINDOW_SIZE: Size = Size::new(980.0, 720.0);
-/// The failure window's size.
-const FAILURE_WINDOW_SIZE: Size = Size::new(560.0, 240.0);
 /// The smallest the window can be made.
 const MIN_WINDOW_SIZE: Size = Size::new(560.0, 420.0);
 /// How often the Match screen reads its status again, so a scan or a post the Jobnet extension
@@ -71,6 +71,7 @@ const PADDING: f32 = 16.0;
 pub struct Launch {
     pub context: Arc<Context>,
     pub runtime: Handle,
+    pub show_setup: bool,
     /// A second start on this database (instance::front).
     pub front: UnboundedReceiver<()>,
 }
@@ -124,8 +125,6 @@ pub struct Shell {
     language_models: language_models::State,
     job_searches: job_searches::State,
     matching: matching::State,
-    /// Windows' light or dark mode, which the window follows.
-    mode: Mode,
     task_manager: task_manager::State,
     taxonomy: taxonomy_screen::State,
     setup: setup_screen::State,
@@ -156,8 +155,6 @@ pub enum Message {
     LocalModel(local_model::Msg),
     JobSearches(job_searches::Msg),
     Matching(matching::Msg),
-    /// Windows' light or dark mode, read at the start and whenever it changes.
-    ThemeMode(Mode),
     TaskManager(task_manager::Msg),
     Taxonomy(taxonomy_screen::Msg),
     Setup(setup_screen::Msg),
@@ -172,68 +169,9 @@ pub enum Message {
     Back,
 }
 
-/// Opens the window and runs until it is closed.
-pub fn run(launch: Launch) -> iced::Result {
-    // boot may be called more than once by iced's types, but runs once; the channel's end is
-    // taken by that run.
-    let launch = Mutex::new(Some(launch));
-    let app = iced::application(move || boot(&launch), update, view)
-        .title(TITLE)
-        .window(window_settings());
-    with_fonts(app)
-        .default_font(style::font())
-        .theme(|shell: &Shell| style::theme(shell.mode))
-        .subscription(|_: &Shell| {
-            iced::Subscription::batch([
-                iced::system::theme_changes().map(Message::ThemeMode),
-                iced::event::listen_with(back_button),
-            ])
-        })
-        .run()
-}
-
-/// A small window saying why the app couldn't start, for a start without a console to say it
-/// in (the window is how a double-clicked JobFinder talks).
-pub fn show_failure(why: String) -> iced::Result {
-    let app = iced::application(move || Failure(why.clone()), |_: &mut Failure, _: ()| {}, failure_view)
-        .title(TITLE)
-        .window_size(FAILURE_WINDOW_SIZE);
-    with_fonts(app)
-        .default_font(style::font())
-        .theme(style::theme(Mode::Light))
-        .run()
-}
-
 /// The application with the fonts built into the program loaded (style::FONTS).
 fn with_fonts<A: iced::Program>(app: iced::Application<A>) -> iced::Application<A> {
     style::FONTS.into_iter().fold(app, |app, font| app.font(font))
-}
-
-/// Why the app couldn't start, as the failure window's state.
-struct Failure(String);
-
-fn failure_view(failure: &Failure) -> Element<'_, ()> {
-    let message = column![
-        row![
-            style::mark(Health::Attention),
-            text("JobFinder couldn't start")
-                .font(style::semibold())
-                .size(style::SECTION_SIZE),
-        ]
-        .spacing(GAP)
-        .align_y(Center),
-        text(failure.0.as_str()).size(style::BODY_SIZE),
-        text("This is in the log too.")
-            .size(style::CAPTION_SIZE)
-            .style(style::secondary),
-    ]
-    .spacing(GAP);
-    container(container(message).padding(PADDING * 1.5).width(Fill).style(style::card))
-        .padding(PADDING)
-        .width(Fill)
-        .height(Fill)
-        .style(style::page)
-        .into()
 }
 
 fn window_settings() -> iced::window::Settings {
@@ -244,16 +182,13 @@ fn window_settings() -> iced::window::Settings {
     }
 }
 
-fn boot(launch: &Mutex<Option<Launch>>) -> (Shell, Task<Message>) {
+fn boot(launch: Launch) -> (Shell, Task<Message>) {
     let Launch {
         context,
         runtime,
+        show_setup,
         front,
-    } = launch
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-        .expect("the window boots once");
+    } = launch;
     let ticks = ticks(&runtime);
     let clicks = notification_clicks(&context);
     let detected = context.game_mode.detected();
@@ -261,7 +196,7 @@ fn boot(launch: &Mutex<Option<Launch>>) -> (Shell, Task<Message>) {
     let shell = Shell {
         context,
         runtime,
-        screen: Screen::Match,
+        screen: if show_setup { Screen::Setup } else { Screen::Match },
         overview: None,
         status: Vec::new(),
         detected_game,
@@ -269,7 +204,6 @@ fn boot(launch: &Mutex<Option<Launch>>) -> (Shell, Task<Message>) {
         language_models: language_models::State::default(),
         job_searches: job_searches::State::default(),
         matching: matching::State::default(),
-        mode: Mode::Light,
         task_manager: task_manager::State::default(),
         taxonomy: taxonomy_screen::State::default(),
         setup: setup_screen::State::default(),
@@ -282,7 +216,6 @@ fn boot(launch: &Mutex<Option<Launch>>) -> (Shell, Task<Message>) {
     };
     let tasks = Task::batch([
         Task::done(Message::Reload),
-        iced::system::theme().map(Message::ThemeMode),
         Task::run(received(front), |()| Message::Front),
         Task::run(received(ticks), |()| Message::Reload),
         Task::run(received(clicks), Message::NotificationClicked),
@@ -294,7 +227,11 @@ fn boot(launch: &Mutex<Option<Launch>>) -> (Shell, Task<Message>) {
             }),
             Message::GameDetected,
         ),
-        first_run(&shell),
+        if show_setup {
+            Task::done(Message::Setup(setup_screen::Msg::Load))
+        } else {
+            Task::none()
+        },
     ]);
     (shell, tasks)
 }
@@ -713,7 +650,6 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
             .chain(Task::done(Message::Reload));
         }
         Message::Said(said) => shell.said = Some(said),
-        Message::ThemeMode(mode) => shell.mode = mode,
         // Handled before (update), since it goes to a place without noting one.
         Message::Back => {}
         Message::Front => {
@@ -724,16 +660,6 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
         }
     }
     Task::none()
-}
-
-/// Opens Setup when the app hasn't been set up yet (setup_steps::is_first_run).
-fn first_run(shell: &Shell) -> Task<Message> {
-    let context = Arc::clone(&shell.context);
-    on_runtime(
-        &shell.runtime,
-        async move { crate::setup::first_run_or_logged(&context).await },
-        |first| Message::Show(if first { Screen::Setup } else { Screen::Match }),
-    )
 }
 
 /// A place in the window: a screen, and on Match and Job searches, which of their pages.
@@ -1111,12 +1037,12 @@ mod tests {
             Arc::new(Context::new(db, taxonomy, KeyVault::with_key_in_memory()))
         });
         let (_front, front) = unbounded_channel();
-        let launch = Mutex::new(Some(Launch {
+        let (shell, _) = boot(Launch {
             context,
             runtime: runtime.handle().clone(),
+            show_setup: false,
             front,
-        }));
-        let (shell, _) = boot(&launch);
+        });
         (shell, runtime)
     }
 

@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use tokio::runtime::Handle;
+
 use jobfinder::account::former_keys::FormerKeys;
 use jobfinder::account::key_vault::KeyVault;
 use jobfinder::app_log::{self, Opened};
@@ -219,7 +221,7 @@ fn run_scan(args: &[String]) -> ExitCode {
     let Some(runtime) = runtime() else {
         return ExitCode::FAILURE;
     };
-    let context = match app_context(&runtime, &database, None, None) {
+    let context = match app_context(runtime.handle(), &database, None, None) {
         Ok(context) => context,
         Err(why) => {
             jobfinder::log_line!("{why}");
@@ -465,8 +467,6 @@ fn run_server(args: &[String]) -> ExitCode {
     let Some(runtime) = runtime() else {
         return failed("The app's runtime couldn't start (see the log).".to_string());
     };
-    // Where the Jobnet extension finds the app.
-    let address = format!("http://127.0.0.1:{port}/");
     match runtime.block_on(instance::running_on(port, &db::shown_path(&database))) {
         Running::None => {}
         Running::Same => {
@@ -491,46 +491,77 @@ fn run_server(args: &[String]) -> ExitCode {
             database.display()
         ));
     };
-    let mut context = match app_context(&runtime, &database, laya_folder, llama_folder) {
-        Ok(context) => context,
-        Err(why) => return failed(why),
-    };
+    let handle = runtime.handle().clone();
+    let startup =
+        runtime.spawn_blocking(move || start_services(handle, port, &database, laya_folder, llama_folder, remember));
+    let shown = desktop::run(startup);
+    runtime.shutdown_timeout(SHUTDOWN_WAIT);
+    match shown {
+        Ok(code) => code,
+        Err(e) => {
+            jobfinder::log_line!("The window couldn't open: {e}.");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Prepares the app and its servers on a worker while the desktop window shows the splash.
+fn start_services(
+    runtime: Handle,
+    port: u16,
+    database: &Path,
+    laya_folder: Option<PathBuf>,
+    llama_folder: Option<PathBuf>,
+    remember: bool,
+) -> Result<desktop::Launch, String> {
+    let mut context = app_context(&runtime, database, laya_folder, llama_folder)?;
+    let data_folder = database.parent().unwrap_or(Path::new("."));
     let folder = data_folder.join(extension::FOLDER);
     context.extension_folder = extension::write(&folder).map_err(|e| {
         jobfinder::log_line!("Couldn't write the Jobnet extension to {}: {e}", folder.display());
         format!("It couldn't be written to {}: {e}", folder.display())
     });
-    // Taken before the window opens, so a taken port is said now rather than behind it.
-    let listener = match runtime.block_on(server::bind(port)) {
-        Ok(listener) => listener,
-        Err(e) => {
-            return failed(format!(
-                "Couldn't serve on port {port}: {e}. Is another program using it? Then start JobFinder with --port and another number."
-            ));
-        }
-    };
-    if remember && let Err(why) = remember_database(&database) {
-        return failed(why);
+    let listener = runtime.block_on(server::bind(port)).map_err(|e| {
+        format!(
+            "Couldn't serve on port {port}: {e}. Is another program using it? Then start JobFinder with --port and another number."
+        )
+    })?;
+    if remember {
+        remember_database(database)?;
     }
     let context = Arc::new(context);
+    let show_setup = runtime.block_on(jobfinder::setup::first_run_or_logged(&context));
     let mut state = AppState::new(Arc::clone(&context), port);
     let (front_sender, front) = tokio::sync::mpsc::unbounded_channel();
     state.front = Some(front_sender);
     let state = Arc::new(state);
     runtime.spawn(jobfinder::idle::unload_when_idle(Arc::clone(&context)));
     let serving = runtime.spawn(server::serve_on(listener, state));
+    // A server that stops while the window is open is logged; the window goes on without it.
+    runtime.spawn(async move {
+        match serving.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => jobfinder::log_line!("The server stopped: {e}"),
+            Err(e) => jobfinder::log_line!("The server stopped: {e}"),
+        }
+    });
     serve_devices(&runtime, &context);
     jobfinder::say!(
-        "JobFinder is running, with the Jobnet extension's address at {address} (data in {}).",
+        "JobFinder is running, with the Jobnet extension's address at http://127.0.0.1:{port}/ (data in {}).",
         database.display()
     );
-    run_window(runtime, context, front, serving)
+    Ok(desktop::Launch {
+        context,
+        runtime,
+        show_setup,
+        front,
+    })
 }
 
 /// Answers paired devices (a phone, a tablet) on their own port, and reads the computer's
 /// tailnet name for them. A port that can't be taken is logged and said on the Devices screen;
 /// the rest of the app goes on without it.
-fn serve_devices(runtime: &tokio::runtime::Runtime, context: &Arc<Context>) {
+fn serve_devices(runtime: &Handle, context: &Arc<Context>) {
     let port = device_protocol::PORT;
     match runtime.block_on(device_server::bind()) {
         Ok(listener) => {
@@ -563,37 +594,6 @@ fn serve_devices(runtime: &tokio::runtime::Runtime, context: &Arc<Context>) {
 /// loading) before the program ends anyway.
 const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Runs the window on this (the main) thread until it is closed, with the server on runtime.
-fn run_window(
-    runtime: tokio::runtime::Runtime,
-    context: Arc<Context>,
-    front: tokio::sync::mpsc::UnboundedReceiver<()>,
-    serving: tokio::task::JoinHandle<std::io::Result<()>>,
-) -> ExitCode {
-    // A server that stops while the window is open is logged; the window goes on without it.
-    runtime.spawn(async move {
-        match serving.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => jobfinder::log_line!("The server stopped: {e}"),
-            Err(e) => jobfinder::log_line!("The server stopped: {e}"),
-        }
-    });
-    let launch = desktop::Launch {
-        context,
-        runtime: runtime.handle().clone(),
-        front,
-    };
-    let shown = desktop::run(launch);
-    runtime.shutdown_timeout(SHUTDOWN_WAIT);
-    match shown {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            jobfinder::log_line!("The window couldn't open: {e}.");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 /// Says why the app couldn't start (and logs it), in a small window.
 fn failed(why: String) -> ExitCode {
     jobfinder::log_line!("{why}");
@@ -608,8 +608,8 @@ fn failed(why: String) -> ExitCode {
 /// llama folder (next to the database unless laya_folder or llama_folder names another). Err
 /// says why when the database can't be opened.
 fn app_context(
-    runtime: &tokio::runtime::Runtime,
-    database: &std::path::Path,
+    runtime: &Handle,
+    database: &Path,
     laya_folder: Option<PathBuf>,
     llama_folder: Option<PathBuf>,
 ) -> Result<Context, String> {
@@ -663,7 +663,7 @@ fn app_context(
 
 /// Deletes the bell's notifications older than notification_model::KEEP_DAYS; a failure is
 /// logged, and they stay till the next start.
-fn forget_old_notifications(runtime: &tokio::runtime::Runtime, db: &sqlx::SqlitePool) {
+fn forget_old_notifications(runtime: &Handle, db: &sqlx::SqlitePool) {
     let now = chrono::Utc::now().timestamp();
     if let Err(e) = runtime.block_on(notification_model::forget_old(db, now)) {
         jobfinder::log_line!("Old notifications couldn't be deleted: {e}");
