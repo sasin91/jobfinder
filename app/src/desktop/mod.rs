@@ -122,7 +122,6 @@ pub struct Shell {
     /// The last thing a click said (Scan now's answer, a page that couldn't open).
     said: Option<String>,
     language_models: language_models::State,
-    local_model: local_model::State,
     job_searches: job_searches::State,
     matching: matching::State,
     /// Windows' light or dark mode, which the window follows.
@@ -268,7 +267,6 @@ fn boot(launch: &Mutex<Option<Launch>>) -> (Shell, Task<Message>) {
         detected_game,
         said: None,
         language_models: language_models::State::default(),
-        local_model: local_model::State::default(),
         job_searches: job_searches::State::default(),
         matching: matching::State::default(),
         mode: Mode::Light,
@@ -483,12 +481,21 @@ fn update(shell: &mut Shell, message: Message) -> Task<Message> {
         return back(shell);
     }
     let goes_somewhere = goes_somewhere(&message);
+    let refresh_status = matches!(
+        message,
+        Message::LocalModel(local_model::Msg::DownloadsFinished(_))
+            | Message::Setup(setup_screen::Msg::Models(local_model::Msg::DownloadsFinished(_)))
+    );
     let before = place_shown(shell);
     let task = handle(shell, message);
     if goes_somewhere && place_shown(shell) != before {
         shell.history.left(before);
     }
-    task
+    if refresh_status {
+        Task::batch([task, Task::done(Message::Reload)])
+    } else {
+        task
+    }
 }
 
 /// A click that goes to another place: the sidebar, a link, a page of Match or Job searches.
@@ -625,7 +632,7 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
         }) => {
             let runner = shell.runner();
             let _ = local_model::update(
-                &mut shell.local_model,
+                &mut shell.setup.models,
                 local_model::Msg::ModelInUse {
                     message: message.clone(),
                     setup_unfinished,
@@ -647,7 +654,7 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
         Message::LocalModel(local_model::Msg::BackToSetup) => return Task::done(Message::Show(Screen::Setup)),
         Message::LocalModel(msg) => {
             let runner = shell.runner();
-            return local_model::update(&mut shell.local_model, msg, &runner).map(Message::LocalModel);
+            return local_model::update(&mut shell.setup.models, msg, &runner).map(Message::LocalModel);
         }
         Message::LanguageModels(msg) => {
             let runner = shell.runner();
@@ -790,7 +797,7 @@ fn view(shell: &Shell) -> Element<'_, Message> {
         Screen::Match if shell.matching.page == matching::Page::Overview => match_screen::view(shell.overview.as_ref()),
         Screen::Match => matching::view(&shell.matching).map(Message::Matching),
         Screen::LanguageModels => language_models::view(&shell.language_models).map(Message::LanguageModels),
-        Screen::LocalModel => local_model::view(&shell.local_model).map(Message::LocalModel),
+        Screen::LocalModel => local_model::view(&shell.setup.models).map(Message::LocalModel),
         Screen::JobSearches => job_searches::view(&shell.job_searches).map(Message::JobSearches),
         Screen::TaskManager => task_manager::view(&shell.task_manager).map(Message::TaskManager),
         Screen::Settings => settings_screen::view(&shell.context),
@@ -855,7 +862,15 @@ fn view(shell: &Shell) -> Element<'_, Message> {
     } else {
         page
     };
-    let main = column![page, status_line(&shell.status, shell.drawer_open, shell.unread)];
+    let main = column![
+        page,
+        status_line(
+            &shell.status,
+            local_model::preparation_status(&shell.setup.models),
+            shell.drawer_open,
+            shell.unread,
+        )
+    ];
     container(row![sidebar(shell), main])
         .width(Fill)
         .height(Fill)
@@ -1002,8 +1017,19 @@ fn not_listening(context: &Context) -> Option<String> {
 
 /// Laya and the app's own model, as they stood at the last reload: a dot and a word each; the
 /// bell at the right end.
-fn status_line(status: &[(Health, String)], drawer_open: bool, unread: i64) -> Element<'_, Message> {
-    let parts = status.iter().map(|(health, part)| {
+fn status_line(
+    status: &[(Health, String)],
+    preparation: Option<(Health, String)>,
+    drawer_open: bool,
+    unread: i64,
+) -> Element<'_, Message> {
+    let shown = if preparation.is_some() {
+        // The download status takes the place of the regular local-model status.
+        &status[..status.len().min(1)]
+    } else {
+        status
+    };
+    let parts = shown.iter().map(|(health, part)| {
         row![
             style::dot(*health),
             text(part.as_str()).size(style::CAPTION_SIZE).style(style::secondary)
@@ -1012,11 +1038,20 @@ fn status_line(status: &[(Health, String)], drawer_open: bool, unread: i64) -> E
         .align_y(Center)
         .into()
     });
-    let line = row![
-        Row::with_children(parts).spacing(GAP * 2.0).width(Fill),
-        bell(drawer_open, unread)
-    ]
-    .align_y(Center);
+    let mut parts = Row::with_children(parts).spacing(GAP * 2.0).width(Fill).align_y(Center);
+    if let Some((health, label)) = preparation {
+        parts = parts.push(
+            button(
+                row![style::dot(health), text(label).size(style::CAPTION_SIZE)]
+                    .spacing(6)
+                    .align_y(Center),
+            )
+            .padding([4, 8])
+            .style(style::standard_button)
+            .on_press(Message::Show(Screen::LocalModel)),
+        );
+    }
+    let line = row![parts, bell(drawer_open, unread)].align_y(Center);
     container(line)
         .padding(iced::Padding::from([4.0, PADDING * 2.0]).right(PADDING))
         .into()

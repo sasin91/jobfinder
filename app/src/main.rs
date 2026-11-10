@@ -21,7 +21,7 @@
 //! Nothing is installed: double-click jobfinder.exe (or run the AppImage on Linux) wherever it is
 //! kept.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -56,7 +56,7 @@ const USAGE: &str = "usage: jobfinder [--port <port>] [--database <file>] [--lay
        jobfinder cleanup [--database <file>]
        jobfinder read-pdf   (a PDF on stdin, its text on stdout; the app runs it)
 
-JobFinder uses one local SQLite database. --database overrides its path for development/testing.";
+JobFinder uses one local SQLite database. --database overrides the saved location for this run.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -72,15 +72,80 @@ fn main() -> ExitCode {
     }
 }
 
-/// The database a subcommand's `[--database <file>]` names, or the default one; None (with the
+/// The database a subcommand's `[--database <file>]` names, or the saved location; None (with the
 /// usage said) for anything else.
 fn database_arg(args: &[String]) -> Option<PathBuf> {
     match args {
-        [] => Some(db::default_path()),
+        [] => match saved_database() {
+            Ok(saved) => Some(saved.unwrap_or_else(db::default_path)),
+            Err(why) => {
+                jobfinder::log_line!("{why}");
+                None
+            }
+        },
         [flag, value] if flag == "--database" => Some(PathBuf::from(value)),
         _ => {
             jobfinder::log_line!("{USAGE}");
             None
+        }
+    }
+}
+
+fn database_setting() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(db::users_data_folder)
+        .join(db::FOLDER)
+        .join("database-location.json")
+}
+
+fn saved_database() -> Result<Option<PathBuf>, String> {
+    let setting = database_setting();
+    match std::fs::read(&setting) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("Couldn't read the database location in {}: {e}", setting.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Couldn't read {}: {e}", setting.display())),
+    }
+}
+
+fn remember_database(database: &Path) -> Result<(), String> {
+    let setting = database_setting();
+    let bytes = serde_json::to_vec(database).map_err(|e| e.to_string())?;
+    let folder = setting.parent().expect("the setting is in the JobFinder config folder");
+    let temporary = setting.with_extension(format!("{}.tmp", std::process::id()));
+    let result = std::fs::create_dir_all(folder)
+        .and_then(|()| std::fs::write(&temporary, bytes))
+        .and_then(|()| std::fs::rename(&temporary, &setting));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|e| format!("Couldn't save the database location in {}: {e}", setting.display()))
+}
+
+fn choose_database(default: &Path) -> Option<PathBuf> {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
+
+    loop {
+        let answer = MessageDialog::new()
+            .set_title("JobFinder setup")
+            .set_description(format!(
+                "JobFinder will keep your database and app data in {}.\n\nWould you like to choose a different folder?",
+                default.parent().unwrap_or(default).display(),
+            ))
+            .set_buttons(MessageButtons::YesNoCancel)
+            .show();
+        match answer {
+            MessageDialogResult::Yes => {
+                if let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Choose a folder for your JobFinder database and app data")
+                    .pick_folder()
+                {
+                    return Some(folder.join(db::FILE));
+                }
+            }
+            MessageDialogResult::No => return Some(default.to_path_buf()),
+            _ => return None,
         }
     }
 }
@@ -330,7 +395,7 @@ async fn former_user_id_in(database: &std::path::Path) -> Option<i64> {
 
 fn run_server(args: &[String]) -> ExitCode {
     let mut port = server::DEFAULT_PORT;
-    let mut database = db::default_path();
+    let mut database = None;
     let mut laya_folder = None;
     let mut llama_folder = None;
     let mut args = args.iter();
@@ -352,7 +417,7 @@ fn run_server(args: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
-            "--database" => database = PathBuf::from(value),
+            "--database" => database = Some(PathBuf::from(value)),
             "--laya" => laya_folder = Some(PathBuf::from(value)),
             "--llama" => llama_folder = Some(PathBuf::from(value)),
             GONE_FLAG_WITH_VALUE => ignored.push(flag.clone()),
@@ -365,6 +430,26 @@ fn run_server(args: &[String]) -> ExitCode {
     // Double-clicked, the console would stand open behind the window; what the app says goes to
     // the log instead. Started from a terminal, it keeps printing there.
     hide_own_console();
+    let (database, remember) = if let Some(database) = database {
+        (database, false)
+    } else {
+        match saved_database() {
+            Err(why) => return failed(why),
+            Ok(Some(database)) => (database, false),
+            Ok(None) => {
+                let default = db::default_path();
+                if default.exists() || from_recruiter::former_default_path().exists() {
+                    (default, false)
+                } else {
+                    let Some(database) = choose_database(&default) else {
+                        return ExitCode::SUCCESS;
+                    };
+                    let remember = database != default;
+                    (database, remember)
+                }
+            }
+        }
+    };
     let moved = from_recruiter::move_data_folder(&database);
     let data_folder = database.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
     open_log(&data_folder);
@@ -424,6 +509,9 @@ fn run_server(args: &[String]) -> ExitCode {
             ));
         }
     };
+    if remember && let Err(why) = remember_database(&database) {
+        return failed(why);
+    }
     let context = Arc::new(context);
     let mut state = AppState::new(Arc::clone(&context), port);
     let (front_sender, front) = tokio::sync::mpsc::unbounded_channel();

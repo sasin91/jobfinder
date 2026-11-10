@@ -32,10 +32,16 @@ pub struct State {
     /// A reload is on its way, so a download's progress isn't asked for twice.
     polling: bool,
     busy: bool,
+    preparation: Option<Preparation>,
     choices: BTreeMap<&'static str, String>,
     /// Persisted choices (or fresh recommendations) that the pending edits started from.
     choice_baseline: BTreeMap<&'static str, String>,
     dirty: bool,
+}
+
+enum Preparation {
+    Running,
+    Failed,
 }
 
 impl State {
@@ -94,6 +100,7 @@ pub enum Msg {
     SaveChoices,
     ChoicesSaved(Result<(), String>),
     RetryDownloads,
+    DownloadsFinished(Result<String, String>),
     CheckTask(&'static str),
     ShowLanguageModels,
     ShowFullModels,
@@ -158,6 +165,9 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             state.dirty = state.choices != state.choice_baseline;
         }
         Msg::SaveChoices => {
+            if working(state) {
+                return Task::none();
+            }
             state.busy = true;
             let choices = state
                 .choices
@@ -175,21 +185,30 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         }
         Msg::ChoicesSaved(Ok(())) => {
             state.dirty = false;
-            return Task::done(Msg::RetryDownloads);
+            state.busy = false;
+            return update(state, Msg::RetryDownloads, runner);
         }
         Msg::RetryDownloads => {
+            if state.busy {
+                return Task::none();
+            }
             state.busy = true;
+            state.preparation = Some(Preparation::Running);
             state.said = Some((
                 Health::Neutral,
-                "Setting up your selected models… Downloads start automatically. Task manager offers cancellation; saved choices and partial downloads are kept.".into(),
+                "Preparing your selected models in the background. You can continue setup while they download. Open Task manager to pause or stop a download.".into(),
             ));
             return Task::batch([
                 runner.run(
                     |context| async move { model_plan::download_selected(context).await },
-                    said,
+                    |answer| Msg::DownloadsFinished(answer.and_then(|result| result.map_err(|e| e.message))),
                 ),
                 Task::done(Msg::Load),
             ]);
+        }
+        Msg::DownloadsFinished(result) => {
+            state.preparation = result.is_err().then_some(Preparation::Failed);
+            return update(state, Msg::Said(result), runner);
         }
         Msg::CheckTask(task) => {
             state.busy = true;
@@ -236,6 +255,10 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
             );
         }
         Msg::MoveModels => {
+            if working(state) {
+                return Task::none();
+            }
+            state.busy = true;
             state.said = Some((Health::Neutral, "Pick the folder to keep the models in…".to_string()));
             return runner.run(
                 |context| async move {
@@ -257,7 +280,10 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
                 },
             );
         }
-        Msg::NoFolder => state.said = None,
+        Msg::NoFolder => {
+            state.busy = false;
+            state.said = None;
+        }
         // The shell goes on.
         Msg::ModelInUse { .. } => state.busy = false,
         Msg::ShowLanguageModels | Msg::ShowFullModels | Msg::BackToSetup => {}
@@ -306,7 +332,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         screen = screen.push(
             button(text("Continue setup").size(style::BODY_SIZE))
                 .style(style::standard_button)
-                .on_press_maybe((!busy).then_some(Msg::BackToSetup)),
+                .on_press(Msg::BackToSetup),
         );
     }
     screen = screen.push(widgets::section("This computer", computer(view, busy)));
@@ -333,22 +359,34 @@ pub fn view(state: &State) -> Element<'_, Msg> {
             ),
         ));
     }
-    let move_models = button(text("Move to another folder…").size(style::BODY_SIZE))
-        .style(style::standard_button)
-        .on_press_maybe((!busy).then_some(Msg::MoveModels));
-    let folder = row![
-        column![
-            text(view.models_folder.as_str()).size(style::BODY_SIZE),
-            widgets::caption("The models you have move with it; new ones download there."),
-        ]
-        .spacing(2)
-        .width(Fill),
-        move_models,
+    screen
+        .push(widgets::section("Models folder", folder_picker(state)))
+        .into()
+}
+
+pub fn setup_folder(state: &State) -> Element<'_, Msg> {
+    let mut body = column![widgets::section_title("Local models folder"), folder_picker(state)].spacing(8);
+    if let Some((health, said)) = &state.said {
+        body = body.push(widgets::message_bar(*health, said.as_str()));
+    }
+    body.into()
+}
+
+fn folder_picker(state: &State) -> Element<'_, Msg> {
+    let view = match &state.view {
+        Some(Ok(view)) => view,
+        Some(Err(why)) => return widgets::message_bar(Health::Attention, why.as_str()),
+        None => return widgets::caption("Reading the models folder…").into(),
+    };
+    column![
+        text(view.models_folder.as_str()).size(style::BODY_SIZE),
+        widgets::caption("New models download here. If you choose another folder, existing model files move with you."),
+        button(text("Choose another folder…").size(style::BODY_SIZE))
+            .style(style::standard_button)
+            .on_press_maybe((!working(state)).then_some(Msg::MoveModels)),
     ]
-    .spacing(14)
-    .align_y(Center)
-    .padding(ROW_PADDING);
-    screen.push(widgets::section("Models folder", folder.into())).into()
+    .spacing(6)
+    .into()
 }
 
 /// The same task choices used in Models, without the catalog and folder-management sections.
@@ -390,22 +428,49 @@ pub fn working(state: &State) -> bool {
     state.busy || state.view.as_ref().is_some_and(|v| v.as_ref().is_ok_and(|v| v.busy))
 }
 
+/// Saved assignments let the user continue before their local files are ready.
+pub fn configured(state: &State) -> bool {
+    configured_plan(state).is_some()
+}
+
+fn configured_plan(state: &State) -> Option<&model_plan::Overview> {
+    if state.dirty {
+        return None;
+    }
+    let plan = state.view.as_ref()?.as_ref().ok()?.plan.as_ref()?;
+    plan.rows
+        .iter()
+        .all(|r| !r.provider.is_empty() || r.task.use_ == crate::account::account_model::APPLICATION)
+        .then_some(plan)
+}
+
 pub fn ready(state: &State) -> bool {
     !working(state)
-        && !state.dirty
-        && state.view.as_ref().is_some_and(|v| {
-            v.as_ref().is_ok_and(|v| {
-                v.plan.as_ref().is_some_and(|p| {
-                    p.rows.iter().all(|r| {
-                        if r.provider.is_empty() {
-                            r.task.use_ == crate::account::account_model::APPLICATION
-                        } else {
-                            r.runtime.is_none() || (r.downloaded && r.runtime_available)
-                        }
-                    })
-                })
-            })
+        && configured_plan(state).is_some_and(|plan| {
+            plan.rows
+                .iter()
+                .all(|r| r.runtime.is_none() || (r.downloaded && r.runtime_available))
         })
+}
+
+pub fn preparation_status(state: &State) -> Option<(Health, String)> {
+    Some(match state.preparation.as_ref()? {
+        Preparation::Running => {
+            let percent = state
+                .view
+                .as_ref()
+                .and_then(|view| view.as_ref().ok())
+                .and_then(|view| view.download.as_ref())
+                .filter(|download| download.running)
+                .and_then(|download| download.percent);
+            let label = match percent {
+                Some(percent) => format!("Downloading models · {percent}% of current file"),
+                None => "Preparing models…".into(),
+            };
+            (Health::Neutral, label)
+        }
+        Preparation::Failed => (Health::Attention, "Model download needs attention".into()),
+    })
 }
 
 fn model_choices(view: &LlamaSetupView, row: &model_plan::Row) -> Vec<ModelChoice> {
@@ -794,6 +859,25 @@ mod tests {
             .iter()
             .map(|(task, file)| (task.to_string(), file.clone()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn saved_choices_allow_setup_navigation_while_models_are_preparing() {
+        let runner = runner().await;
+        let mut state = State::default();
+        reload(&mut state, &runner).await;
+        assert!(!configured(&state));
+
+        model_plan::save_choices(&runner.context, &chosen(&state))
+            .await
+            .unwrap();
+        state.busy = true;
+        state.preparation = Some(Preparation::Running);
+        reload(&mut state, &runner).await;
+
+        assert!(configured(&state));
+        assert!(!ready(&state));
+        assert!(preparation_status(&state).is_some());
     }
 
     #[tokio::test]

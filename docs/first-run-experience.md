@@ -222,14 +222,19 @@ storage changes; `evaluation_version` identifies the test criteria.
 Constraints enforce flags, step ranges and complete optional GPU information.
 Assessment metadata and its child checks are saved in one transaction.
 
+A fresh desktop launch asks where to keep the database and app data before
+opening SQLite. Setup starts with the database path and a picker for the local
+models folder. Both choices carry over to subsequent launches.
+
 Setup's Models step embeds a simpler version of the Models overview: detected
 hardware, six task selectors, recommendations with reasons and fit estimates,
 shared-model download totals, progress/retry, and optional local checks. Cloud
 and external provider configuration stays behind an advanced-choices link.
 Users can adjust every task before choosing **Use these models**. This saves the
 explicit choices and automatically downloads their missing local files and
-runtime; there is no separate download-plan action. Choices are retained if a
-download is interrupted, and Continue waits for the selected files and runtime.
+runtime. Continue is available once the choices are saved. The bottom status
+bar shows background progress and links to Models for retries. Reading the CV
+and running the trial scan require the models and runtime to be ready.
 
 Models in the main navigation uses the same task selectors and download action,
 with the complete catalog and folder controls below. Evaluate again is explicit

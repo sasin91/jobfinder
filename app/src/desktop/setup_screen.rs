@@ -65,7 +65,7 @@ fn interval_of(hours: Option<u32>) -> Option<Interval> {
 
 #[derive(Default)]
 pub struct State {
-    models: local_model::State,
+    pub(super) models: local_model::State,
     /// None until read; Err says why it couldn't be.
     steps: Option<Result<Arc<Steps>, String>>,
     cv_text: text_editor::Content,
@@ -96,6 +96,7 @@ pub struct State {
 pub enum Msg {
     Models(local_model::Msg),
     Load,
+    LoadSteps,
     Stage(usize),
     StageRecorded(Result<(), String>),
     SearchName(String),
@@ -147,30 +148,33 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         Msg::Models(local_model::Msg::ShowLanguageModels) => return Task::done(Msg::ShowLanguageModels),
         Msg::Models(local_model::Msg::ShowFullModels) => return Task::done(Msg::ShowLocalModel),
         Msg::Models(msg) => {
-            let finished = matches!(msg, local_model::Msg::Said(_));
+            let refresh = matches!(msg, local_model::Msg::ChoicesSaved(Ok(())));
             let task = local_model::update(&mut state.models, msg, runner).map(Msg::Models);
-            return if finished {
-                Task::batch([task, Task::done(Msg::Load)])
+            return if refresh {
+                Task::batch([task, Task::done(Msg::LoadSteps)])
             } else {
                 task
             };
         }
         Msg::Load => {
             return Task::batch([
-                runner.run(
-                    |context| async move {
-                        let cv = setup_steps::cv(&context).await?;
-                        Ok(Arc::new(Steps {
-                            database: setup_steps::database(&context),
-                            cv,
-                            schedule: setup_steps::schedule(&context).await,
-                            search: setup_steps::search_step(&context).await.map_err(|e| e.message)?,
-                        }))
-                    },
-                    |read| Msg::Loaded(read.and_then(|steps| steps)),
-                ),
+                Task::done(Msg::LoadSteps),
                 Task::done(Msg::Models(local_model::Msg::Load)),
             ]);
+        }
+        Msg::LoadSteps => {
+            return runner.run(
+                |context| async move {
+                    let cv = setup_steps::cv(&context).await?;
+                    Ok(Arc::new(Steps {
+                        database: setup_steps::database(&context),
+                        cv,
+                        schedule: setup_steps::schedule(&context).await,
+                        search: setup_steps::search_step(&context).await.map_err(|e| e.message)?,
+                    }))
+                },
+                |read| Msg::Loaded(read.and_then(|steps| steps)),
+            );
         }
         Msg::Loaded(steps) => {
             if let Ok(steps) = &steps {
@@ -453,7 +457,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     let title = row![
         widgets::page_title(
             "Set up JobFinder",
-            widgets::note("Set up your models, review your CV, choose jobs and sites, then try a first scan. You can leave and resume later. Cloud tasks send their inputs to the provider you choose."),
+            widgets::note("Choose where to keep your data and models, then set up your CV, jobs and sites. You can leave and resume later."),
         ),
         drawings::drawing(&drawings::HERO),
     ]
@@ -472,7 +476,8 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         }
         Some(Ok(steps)) => steps,
     };
-    let labels = ["Welcome", "Models", "Your CV", "Jobs & sites", "First scan", "Schedule"];
+    let labels = ["Storage", "Models", "Your CV", "Jobs & sites", "First scan", "Schedule"];
+    let models_configured = local_model::configured(&state.models);
     let done = [
         true,
         local_model::ready(&state.models),
@@ -499,13 +504,19 @@ pub fn view(state: &State) -> Element<'_, Msg> {
                 style::standard_button
             })
             .on_press_maybe(
-                (!state.busy && (index <= 1 || done[1]) && (index <= 3 || state.stage == 3 || !state.search_dirty))
+                (!state.busy
+                    && (index <= 1 || models_configured)
+                    && (index <= 3 || state.stage == 3 || !state.search_dirty))
                     .then_some(Msg::Stage(index)),
             ),
         );
     }
     let content = match state.stage {
-        0 => step("Welcome — your data and this computer", true, database_step(&steps.database)),
+        0 => step("Choose where JobFinder stores files", true, column![
+            database_step(&steps.database),
+            widgets::divider(),
+            local_model::setup_folder(&state.models).map(Msg::Models),
+        ].spacing(12).into()),
         1 => step("Choose your models", done[1], column![
             widgets::message_bar(Health::Attention, crate::dashboard::PRIVACY_GUIDANCE),
             local_model::setup_view(&state.models).map(Msg::Models),
@@ -541,7 +552,9 @@ pub fn view(state: &State) -> Element<'_, Msg> {
                 .padding([8.0, 16.0])
                 .style(style::primary_button)
                 .on_press_maybe(
-                    (!state.busy && (state.stage != 1 || done[1]) && (state.stage <= 3 || !state.search_dirty))
+                    (!state.busy
+                        && (state.stage != 1 || models_configured)
+                        && (state.stage <= 3 || !state.search_dirty))
                         .then_some(Msg::Stage(state.stage + 1)),
                 ),
         );
@@ -655,6 +668,12 @@ fn search_step<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Eleme
 
 fn first_scan<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Element<'a, Msg> {
     let mut body = column![widgets::note("Try one saved search: up to three posts matched, with a five-minute limit. Models on cloud providers use your API account. Open Task manager for live stages and cancellation; Job searches shows results and failures.")].spacing(8);
+    let models_ready = local_model::ready(&state.models);
+    if !models_ready && step.scan_problem.is_none() {
+        body = body.push(widgets::note(
+            "Your selected models need to be ready before the trial scan. You can skip it and continue setup.",
+        ));
+    }
     if let Some(summary) = &step.scan_summary {
         body = body.push(widgets::caption(summary.clone()));
     }
@@ -670,7 +689,7 @@ fn first_scan<'a>(step: &'a setup_steps::SearchStep, state: &'a State) -> Elemen
         button(text("Try first scan").size(style::BODY_SIZE))
             .style(style::primary_button)
             .on_press_maybe(
-                (!state.busy && !state.search_dirty && step.id > 0 && step.scan_problem.is_none())
+                (!state.busy && models_ready && !state.search_dirty && step.id > 0 && step.scan_problem.is_none())
                     .then_some(Msg::FirstScan)
             ),
         button(text("Skip for now").size(style::BODY_SIZE))
@@ -718,6 +737,7 @@ fn database_step(database: &DatabaseStep) -> Element<'_, Msg> {
         "Your data is kept in"
     };
     column![
+        widgets::section_title("Database"),
         text(database.system.clone()).size(style::BODY_SIZE),
         widgets::caption(database.storage.clone()),
         text(format!("{kept} {}.", database.path)).size(style::BODY_SIZE),
@@ -752,6 +772,7 @@ fn cv_step<'a>(cv: &'a CvStep, state: &'a State) -> Element<'a, Msg> {
         }
         return body.into();
     }
+    let models_ready = local_model::ready(&state.models);
     let waiting = |msg: Msg| (!state.busy).then_some(msg);
     let picked = if state.cv_name.is_empty() {
         "A PDF or text file, or paste it below.".to_string()
@@ -802,7 +823,12 @@ fn cv_step<'a>(cv: &'a CvStep, state: &'a State) -> Element<'a, Msg> {
                 .on_toggle(Msg::Replace),
         );
     }
-    let can_read = !state.cv_text.text().trim().is_empty() && (cv.filled.is_none() || state.replace);
+    if !models_ready {
+        body = body.push(widgets::note(
+            "You can add your CV text now and read it once the models are ready.",
+        ));
+    }
+    let can_read = models_ready && !state.cv_text.text().trim().is_empty() && (cv.filled.is_none() || state.replace);
     body.push(
         button(text("Read the CV into my profile").size(style::BODY_SIZE))
             .style(style::primary_button)
