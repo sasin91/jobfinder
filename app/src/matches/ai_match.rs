@@ -11,7 +11,7 @@ use super::apply_instructions::{self, ApplyInstructions};
 use super::match_model::{self, NewMatch};
 use super::match_prompts::{self, Undecided};
 use super::matcher::{self, Groups, LANGUAGE, LOCATION, Matcher, Score, Verdict, Verdicts};
-use super::{Job, KnownTerm, Profile};
+use super::{Job, KnownTerm, Profile, rejection_feedback};
 use crate::laya::laya_client::{self, LayaClient, LayaReading};
 use crate::llm::{Llm, LlmException};
 use crate::taxonomy::Taxonomy;
@@ -159,7 +159,8 @@ fn grounded_verdict(unit: &Undecided, answer: &match_prompts::Judged, cv: &str) 
 /// The verdicts scored, and saved as the user's match.
 async fn score_and_save(matching: &Matching<'_>, new: NewMatch<'_>, groups: Groups, verdicts: &Verdicts) -> AiMatch {
     let verdicts = matcher::combine(&groups, verdicts);
-    let score = matcher::score(&groups, &verdicts);
+    let mut score = matcher::score(&groups, &verdicts);
+    rejection_feedback::adjust(matching.db, new.job, &mut score).await;
     let laya_summary = matcher::laya_summary(new.job, &groups, &verdicts);
     // Laya's own reading of the verdicts, with its model; the score comes back without it if
     // Laya fails.

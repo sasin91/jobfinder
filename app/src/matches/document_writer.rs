@@ -563,6 +563,7 @@ mod tests {
             resume_text: None,
             resume_written_at: None,
             rejected_at: None,
+            feedback_note: None,
             created_at: 0,
             resume_structured: false,
             items: vec![item("skill", "Rust", "met", "5 years of Rust")],

@@ -293,6 +293,7 @@ fn saved_match(case: &Value) -> SavedMatch {
         resume_text: optional(&case["resume_text"]),
         resume_written_at: None,
         rejected_at: None,
+        feedback_note: None,
         created_at: case["created_at"].as_i64().unwrap(),
         resume_structured: false,
         items: case["items"]

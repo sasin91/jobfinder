@@ -268,6 +268,78 @@ fn php_request() -> match_service::MatchRequest {
 }
 
 #[tokio::test]
+async fn rejection_feedback_lowers_future_scores_and_bring_back_removes_it() {
+    let context = context().await;
+    let mut request = php_request();
+    request.job.job_title = "PHP-UDVIKLER".to_string();
+    request.job.company = "A different company".to_string();
+    request.profile.title = vec![request.job.job_title.clone()];
+    let baseline = match_service::ai_match(&context, &request).await.unwrap().result;
+
+    match_service::reject(&context, 21, &["applied".to_string()], &[], false)
+        .await
+        .unwrap();
+    let applied = match_service::ai_match(&context, &request).await.unwrap();
+    assert_eq!(applied.result, baseline);
+
+    match_service::reject(
+        &context,
+        21,
+        &["irrelevant".to_string(), "company".to_string()],
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    // A late dismissal from a search card cannot erase explicit feedback.
+    jobfinder::matches::match_model::reject(context.db(), 21, &[], 1760000001)
+        .await
+        .unwrap();
+    request.job_text = "Another job posting seeking a PHP developer.".to_string();
+    request.cv_text = "PHP-udvikler with experience in PHP.".to_string();
+    let adjusted = match_service::ai_match(&context, &request).await.unwrap();
+    assert_eq!(adjusted.result.index, baseline.index - 0.25);
+    assert_eq!(adjusted.result.tag, "medium");
+    assert_eq!(adjusted.result.parts, baseline.parts);
+    let saved_id = adjusted.saved_id.unwrap();
+    let saved = match_service::saved_result(&context, saved_id).await.unwrap();
+    assert!(
+        saved
+            .parts
+            .contains("marked a match with this role title as irrelevant")
+    );
+    assert_eq!(saved.score.percent, 75);
+
+    let post = "PHP-udvikler\nDin profil\n- Erfaring med PHP";
+    let quick = match_service::quick_match(&context, post, "", "PHP").await.unwrap();
+    assert!(
+        quick
+            .parts
+            .contains("marked a match with this role title as irrelevant")
+    );
+
+    request.job.company = " FIRMA ".to_string();
+    let both = match_service::ai_match(&context, &request).await.unwrap();
+    assert_eq!(both.result, adjusted.result);
+
+    // A rejection for one role does not penalize a different role, even at the same company,
+    // beyond the smaller adjustment for explicitly rejecting the company.
+    request.job.job_title = "Laravel developer".to_string();
+    request.profile.title = vec![request.job.job_title.clone()];
+    let company = match_service::ai_match(&context, &request).await.unwrap();
+    assert_eq!(company.result.index, 0.90);
+    assert!(company.result.feedback_note.unwrap().contains("this company"));
+
+    match_service::reject(&context, 21, &[], &[], true).await.unwrap();
+    request.job.job_title = "PHP-UDVIKLER".to_string();
+    request.profile.title = vec![request.job.job_title.clone()];
+    let restored = match_service::ai_match(&context, &request).await.unwrap();
+    assert_eq!(restored.result, baseline);
+    let saved = match_service::saved_result(&context, saved_id).await.unwrap();
+    assert_eq!(saved.score.percent, 75);
+}
+
+#[tokio::test]
 async fn a_laya_model_that_cant_load_is_said_under_the_score() {
     let folder = std::env::temp_dir().join(format!("jobfinder-laya-{}", std::process::id()));
     std::fs::create_dir_all(&folder).unwrap();

@@ -179,7 +179,7 @@ impl MatchResult {
             saved_id: fresh.saved_id,
             score: MatchScore::of(fresh.score.index, &fresh.score.tag),
             heading: heading(title, &fresh.job.company),
-            parts: parts(&fresh.score.parts),
+            parts: with_feedback(parts(&fresh.score.parts), fresh.score.feedback_note.as_deref()),
             saved_at: String::new(),
             reject: RejectButton::from(fresh.saved_id, None),
             opening: None,
@@ -205,7 +205,10 @@ impl MatchResult {
             saved_id: Some(found.id),
             score: MatchScore::of(found.score, &found.tag),
             heading: heading(&found.job_title, &found.company),
-            parts: format!("{}/{} points", found.points, found.max_points),
+            parts: with_feedback(
+                format!("{}/{} points", found.points, found.max_points),
+                found.feedback_note.as_deref(),
+            ),
             saved_at: dates::iso(found.created_at),
             reject: RejectButton::from(Some(found.id), found.rejected_at.map(|_| found.rejections.as_slice())),
             opening: OpeningLine::of(&found.opening),
@@ -282,6 +285,16 @@ fn parts(parts: &IndexMap<String, Part>) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+fn with_feedback(mut parts: String, note: Option<&str>) -> String {
+    if let Some(note) = note {
+        if !parts.is_empty() {
+            parts.push_str(" · ");
+        }
+        parts.push_str(note);
+    }
+    parts
 }
 
 /// The groups with requirements, missing first.

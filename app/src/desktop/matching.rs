@@ -1995,7 +1995,10 @@ fn reject_card<'a>(shown: &'a Shown, reject: &'a RejectButton, busy: bool) -> El
     let mut form = column![
         text("Why not? Tick all that apply")
             .font(style::semibold())
-            .size(style::BODY_SIZE)
+            .size(style::BODY_SIZE),
+        widgets::caption(
+            "Irrelevant and company rejections lower the scores of future matches with that role title or company."
+        )
     ]
     .spacing(8);
     for reason in &reject.reasons {

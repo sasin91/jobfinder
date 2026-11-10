@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "-- One of the user's saved matches, with the CV it was matched with. ?1 the match.\nSELECT\n  m.id,\n  m.job_title,\n  m.company,\n  m.job_url,\n  m.job_text,\n  COALESCE(cv.name, '') AS \"cv_name!: String\",\n  COALESCE(cv.text, '') AS \"cv_text!: String\",\n  m.score,\n  m.points,\n  m.max_points,\n  m.tag,\n  m.rejected_at,\n  m.created_at,\n  m.deadline,\n  m.closed_at,\n  m.closed_why\nFROM matches m\nLEFT JOIN (\n  SELECT md.match_id, d.name, d.text\n  FROM match_documents md\n  JOIN documents d ON d.id = md.document_id AND d.kind = 'cv'\n) cv ON cv.match_id = m.id\nWHERE m.id = ?1\n",
+  "query": "-- One of the user's saved matches, with the CV it was matched with. ?1 the match.\nSELECT\n  m.id,\n  m.job_title,\n  m.company,\n  m.job_url,\n  m.job_text,\n  COALESCE(cv.name, '') AS \"cv_name!: String\",\n  COALESCE(cv.text, '') AS \"cv_text!: String\",\n  m.score,\n  m.points,\n  m.max_points,\n  m.tag,\n  m.feedback_note,\n  m.rejected_at,\n  m.created_at,\n  m.deadline,\n  m.closed_at,\n  m.closed_why\nFROM matches m\nLEFT JOIN (\n  SELECT md.match_id, d.name, d.text\n  FROM match_documents md\n  JOIN documents d ON d.id = md.document_id AND d.kind = 'cv'\n) cv ON cv.match_id = m.id\nWHERE m.id = ?1\n",
   "describe": {
     "columns": [
       {
@@ -115,8 +115,19 @@
         }
       },
       {
-        "name": "rejected_at",
+        "name": "feedback_note",
         "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "feedback_note"
+          }
+        }
+      },
+      {
+        "name": "rejected_at",
+        "ordinal": 12,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -127,7 +138,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 12,
+        "ordinal": 13,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -138,7 +149,7 @@
       },
       {
         "name": "deadline",
-        "ordinal": 13,
+        "ordinal": 14,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -149,7 +160,7 @@
       },
       {
         "name": "closed_at",
-        "ordinal": 14,
+        "ordinal": 15,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -160,7 +171,7 @@
       },
       {
         "name": "closed_why",
-        "ordinal": 15,
+        "ordinal": 16,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -186,11 +197,12 @@
       false,
       false,
       true,
+      true,
       false,
       true,
       true,
       false
     ]
   },
-  "hash": "1c3aa9ee6ff1e2cccc3e989925d2381edee4a906a978745b92faba951ca27c75"
+  "hash": "6d6043b6252aa5a7b882b48a52208dd8fe8305e8fa759cfe6568a38855470d6b"
 }

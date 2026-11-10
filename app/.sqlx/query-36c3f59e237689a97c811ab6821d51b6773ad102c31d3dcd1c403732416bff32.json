@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "-- Use active, explicit rejections as preference signals for future matches.\nSELECT DISTINCT\n  r.reason,\n  CASE r.reason WHEN 'irrelevant' THEN m.job_title ELSE m.company END AS \"value!: String\"\nFROM match_rejections r\nJOIN matches m ON m.id = r.match_id\nWHERE m.rejected_at IS NOT NULL AND r.reason IN ('irrelevant', 'company')\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_rejections",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "value!: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "36c3f59e237689a97c811ab6821d51b6773ad102c31d3dcd1c403732416bff32"
+}

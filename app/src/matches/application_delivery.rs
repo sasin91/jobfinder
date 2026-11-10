@@ -328,6 +328,7 @@ mod tests {
             resume_text: Some("Jonas Hansen, tailored".into()),
             resume_written_at: Some(1),
             rejected_at: None,
+            feedback_note: None,
             created_at: 0,
             resume_structured: false,
             items: Vec::new(),

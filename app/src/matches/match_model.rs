@@ -55,7 +55,7 @@ mod lengths {
 }
 
 /// The decimals a match's score is kept with.
-const SCORE_DECIMALS: i32 = 4;
+pub(super) const SCORE_DECIMALS: i32 = 4;
 
 /// The verdicts an item can be saved with; anything else is saved as missing.
 const VERDICTS: [&str; 3] = ["met", "partial", "missing"];
@@ -190,6 +190,8 @@ pub struct SavedMatch {
     pub points: i64,
     pub max_points: i64,
     pub tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback_note: Option<String>,
     /// The newest application's text and when it was written (documents), None when none is.
     pub application_text: Option<String>,
     pub application_written_at: Option<i64>,
@@ -311,6 +313,7 @@ pub async fn save(
     let cv_name = cut(new.cv_name, lengths::NAME);
     let deadline = super::still_open::deadline_of(new.job_text, now);
     let index = match_score::round_to(score.index, SCORE_DECIMALS);
+    let feedback_note = score.feedback_note.as_deref();
     let mut tx = crate::db::write_transaction(db).await?;
     let id = sqlx::query_file!(
         "queries/match_model/save.sql",
@@ -323,7 +326,8 @@ pub async fn save(
         score.total,
         score.tag,
         now,
-        deadline
+        deadline,
+        feedback_note
     )
     .execute(&mut *tx)
     .await?
@@ -675,6 +679,7 @@ pub async fn find(db: &SqlitePool, id: i64) -> sqlx::Result<Option<SavedMatch>> 
         points: row.points,
         max_points: row.max_points,
         tag: row.tag,
+        feedback_note: row.feedback_note,
         application_written_at: application.as_ref().map(|document| document.written_at),
         application_text: application.map(|document| document.text),
         resume_written_at: resume.as_ref().map(|document| document.written_at),
@@ -963,10 +968,15 @@ pub async fn save_integration(
 }
 
 /// Rejects one of the user's matches (not interested), with why; false when it isn't theirs.
+/// A dismissal without reasons preserves any explicit reasons already recorded.
 pub async fn reject(db: &SqlitePool, id: i64, rows: &[Rejection], now: i64) -> sqlx::Result<bool> {
     let mut tx = crate::db::write_transaction(db).await?;
     if !mark_rejected(&mut tx, id, Some(now)).await? {
         return Ok(false);
+    }
+    if rows.is_empty() {
+        tx.commit().await?;
+        return Ok(true);
     }
     sqlx::query!(r#"DELETE FROM match_rejections WHERE match_id = ?1"#, id)
         .execute(&mut *tx)

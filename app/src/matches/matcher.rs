@@ -130,6 +130,8 @@ pub struct Score {
     pub index: f64,
     pub tag: String,
     pub parts: IndexMap<String, Part>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback_note: Option<String>,
 }
 
 /// What a CV phrase names in the taxonomy.
@@ -765,6 +767,7 @@ pub fn score(groups: &Groups, verdicts: &Verdicts) -> Score {
         index,
         tag: match_tag(index).into(),
         parts,
+        feedback_note: None,
     }
 }
 

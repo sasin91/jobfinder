@@ -21,6 +21,7 @@ use super::match_model::{self, JOBNET_JOBLOG, LISTS, ListedMatch, NewMatch, SHOR
 use super::match_result::{Fresh, MatchResult};
 use super::matcher::{self, Matcher, Verdict, Verdicts};
 use super::page_reader::{self, Page};
+use super::rejection_feedback;
 use super::resume_comparison::ResumeComparison;
 use super::saved_match_row::{SavedMatchRow, TAILORED_CV};
 use super::{Job, Profile, apply_instructions, match_prompts, pdf_writer, reject_reason, seniority, taxonomy_lessons};
@@ -155,7 +156,8 @@ pub async fn quick_match(
             "The free match found no skills it knows in this post. The AI match reads requirements written as sentences too.",
         ));
     }
-    let score = matcher::score(&groups, &verdicts);
+    let mut score = matcher::score(&groups, &verdicts);
+    rejection_feedback::adjust(context.db(), &job, &mut score).await;
     let apply = apply_instructions::read(job_text);
     let laya = laya_client::reading(context.laya.as_ref(), &matcher::laya_summary(&job, &groups, &verdicts)).await;
     let fresh = Fresh {

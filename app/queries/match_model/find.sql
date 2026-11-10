@@ -11,6 +11,7 @@ SELECT
   m.points,
   m.max_points,
   m.tag,
+  m.feedback_note,
   m.rejected_at,
   m.created_at,
   m.deadline,

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "-- A new saved match: the post and its score; the CV it was matched with is linked to it after\n-- (match_documents). ?1 job_title, ?2 company, ?3 job_url, ?4 job_text, ?5 score,\n-- ?6 points, ?7 max_points, ?8 tag, ?9 created_at,\n-- ?10 the application deadline read from the post (matches::still_open::deadline_of).\n-- ?11 explains any ranking adjustment based on prior rejections.\nINSERT INTO matches\n  (job_title, company, job_url, job_text, score, points, max_points, tag,\n   created_at, deadline, feedback_note)\nVALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "eb0b831d19071a3d38489f27789ca9e3ed1869f3ad80c80a6603222e9a5514eb"
+}

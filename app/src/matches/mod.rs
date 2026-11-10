@@ -31,6 +31,7 @@ pub mod page_reader;
 pub mod pdf_writer;
 pub mod reject_button;
 pub mod reject_reason;
+mod rejection_feedback;
 pub mod resume_comparison;
 pub mod saved_match_row;
 pub mod score_cursor;
