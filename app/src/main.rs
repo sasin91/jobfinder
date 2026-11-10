@@ -45,7 +45,7 @@ use jobfinder::server::{self, AppState};
 use jobfinder::taxonomy::Taxonomy;
 use jobfinder::taxonomy_store;
 use jobfinder::whisper::{self, Whisper};
-use jobfinder::{app_update, cleanup, db, desktop, extension};
+use jobfinder::{cleanup, db, desktop, extension};
 
 /// Options of the web pages, which are gone: a shortcut or login task that still gives one starts
 /// the window anyway, and the log says the option is ignored.
@@ -70,7 +70,7 @@ fn main() -> ExitCode {
         Some("scan") => run_scan(&args[1..]),
         Some("cleanup") => run_cleanup(&args[1..]),
         #[cfg(windows)]
-        Some(app_update::FINISH_UPDATE) => match app_update::finish_windows_update() {
+        Some(jobfinder::app_update::FINISH_UPDATE) => match jobfinder::app_update::finish_windows_update() {
             Ok(()) => ExitCode::SUCCESS,
             Err(why) => update_failed(why),
         },
