@@ -17,6 +17,7 @@
 //! model busy for minutes), and waiting while a game runs (game_mode), or going on with their cloud
 //! key meanwhile (game_mode::stand_in).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -177,9 +178,12 @@ impl ScanReport {
         if self.scanned == 0 && self.matched > 0 {
             said.push_str(&format!(" {} post(s) an earlier scan left were matched.", self.matched));
         }
+        let mut shown = HashSet::new();
         for problem in &self.problems {
-            said.push(' ');
-            said.push_str(problem);
+            if shown.insert(problem) {
+                said.push(' ');
+                said.push_str(problem);
+            }
         }
         if let Some(why) = self.stopped.as_ref().filter(|_| self.scanned > 0) {
             said.push(' ');

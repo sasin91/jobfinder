@@ -23,6 +23,7 @@ pub fn default_runtime() -> &'static dyn ModelRuntime {
 pub async fn load_key(context: &Context, key: &KeyFor) -> Result<Llm, LlmException> {
     match for_provider(&key.provider) {
         Some(runtime) => runtime.load(context, &key.model).await,
-        None => Llm::use_key(&key.provider, &key.api_key, &key.model, &key.base_url),
+        None => Llm::use_key(&key.provider, &key.api_key, &key.model, &key.base_url)
+            .map(|llm| llm.track_billing(&context.billing)),
     }
 }

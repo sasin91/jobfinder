@@ -2,8 +2,11 @@
 //! window: what the app told the user (notifications), newest first, each opening the place it
 //! is about. Opening it marks the ones it shows as read, so the bell's count goes.
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use std::sync::LazyLock;
+
+use iced::widget::{button, column, container, rich_text, row, scrollable, span, text};
 use iced::{Center, Element, Fill, Task};
+use regex::Regex;
 
 use super::style;
 use super::widgets::{self, ROW_PADDING};
@@ -60,6 +63,8 @@ pub enum Msg {
     Loaded(Result<Vec<NotificationRow>, String>),
     /// A row was clicked: the window opens its link, and the drawer closes.
     Open(String),
+    /// A web link in the notification text.
+    OpenWeb(String),
     /// Close was clicked.
     Close,
 }
@@ -88,7 +93,7 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         }
         Msg::Loaded(rows) => state.rows = Some(rows),
         // The shell opens it, and closes the drawer.
-        Msg::Open(_) | Msg::Close => {}
+        Msg::Open(_) | Msg::OpenWeb(_) | Msg::Close => {}
     }
     Task::none()
 }
@@ -146,7 +151,13 @@ fn notification_row(row: &NotificationRow) -> Element<'_, Msg> {
             .font(if row.new { style::semibold() } else { style::font() });
     let mut lines = column![title].spacing(2).width(Fill);
     if !row.text.is_empty() {
-        lines = lines.push(widgets::caption(row.text.as_str()));
+        lines = lines.push(
+            rich_text(link_spans(&row.text))
+                .size(style::CAPTION_SIZE)
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .style(style::secondary)
+                .on_link_click(Msg::OpenWeb),
+        );
     }
     let line = row![style::mark(row.health), lines, widgets::caption(row.told_at.as_str())]
         .spacing(GAP)
@@ -159,9 +170,38 @@ fn notification_row(row: &NotificationRow) -> Element<'_, Msg> {
         .into()
 }
 
+fn link_spans(body: &str) -> Vec<text::Span<'_, String, iced::Font>> {
+    static WEB_LINK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s<>"\x00-\x1f]+"#).expect("web link pattern"));
+    let mut spans = Vec::new();
+    let mut end = 0;
+    for found in WEB_LINK.find_iter(body) {
+        let link = found
+            .as_str()
+            .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        if !reqwest::Url::parse(link).is_ok_and(|url| url.has_host()) {
+            continue;
+        }
+        spans.push(span(&body[end..found.start()]));
+        spans.push(span(link).underline(true).link(link.to_string()));
+        end = found.start() + link.len();
+    }
+    spans.push(span(&body[end..]));
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_links_exclude_the_surrounding_punctuation() {
+        let body = "Visit (https://example.com/billing/), or https://example.org/?a=1&b=2. Ignore file:///tmp.";
+        let spans = link_spans(body);
+        let links: Vec<_> = spans.iter().filter_map(|span| span.link.as_deref()).collect();
+        assert_eq!(links, ["https://example.com/billing/", "https://example.org/?a=1&b=2"]);
+        assert_eq!(spans.iter().map(|span| span.text.as_ref()).collect::<String>(), body);
+    }
 
     #[test]
     fn a_row_shows_a_failed_scan_as_needing_attention_and_unread_ones_as_new() {

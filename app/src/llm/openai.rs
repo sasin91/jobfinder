@@ -5,6 +5,7 @@
 
 use serde_json::{Value, json};
 
+use super::billing::{Billing, Provider};
 use super::{Effort, LlmException, LlmResponse};
 
 /// OpenAI's API.
@@ -27,6 +28,7 @@ pub struct Openai {
     /// What messages call the provider: OpenAI, or the local model.
     name: &'static str,
     client: reqwest::Client,
+    pub(super) billing: Option<Billing>,
 }
 
 /// web_search's answer and the tokens it took.
@@ -55,6 +57,7 @@ impl Openai {
             base_url: base_url.to_string(),
             name,
             client: super::http_client(base_url)?,
+            billing: None,
         })
     }
 
@@ -168,8 +171,22 @@ impl Openai {
         let answer = super::post(&self.client, &url, headers, body)
             .await
             .map_err(|e| self.not_answered(&e))?;
-        if answer.status < 400 && answer.is_json() {
+        let accepted = (200..300).contains(&answer.status) && answer.is_json();
+        let blocked = self.name == OPENAI_NAME && Provider::Openai.blocked(&answer);
+        if let Some(billing) = &self.billing {
+            billing.observe(Provider::Openai, blocked, accepted);
+        }
+        if accepted {
             return Ok(answer);
+        }
+        if blocked {
+            let detail = answer.error_message();
+            let message = if detail.is_empty() {
+                "OpenAI says the key has no quota left. Check your API billing.".to_string()
+            } else {
+                format!("OpenAI says the key has no quota left: {detail}")
+            };
+            return Err(LlmException::answered(message, false, answer));
         }
         Err(match answer.status {
             401 => super::rejected_key(self.name, answer),
@@ -189,19 +206,9 @@ impl Openai {
         super::not_answered(self.name, &self.base_url, error)
     }
 
-    /// A 429 in the provider's own words: a used-up quota (billing) can't be waited out; a rate
-    /// limit can, and says for how long when it can.
+    /// A temporary rate limit in the provider's own words, with the retry interval when given.
     fn rate_limited(&self, answer: LlmResponse) -> LlmException {
         let detail = answer.error_message();
-        if answer.error_code() == "insufficient_quota" {
-            let detail = if detail.is_empty() {
-                "check the plan and billing.".to_string()
-            } else {
-                detail
-            };
-            let message = format!("{} says the key has no quota left: {detail}", self.name);
-            return LlmException::answered(message, false, answer);
-        }
         let mut message = if detail.is_empty() {
             format!("{} rate limited the request.", self.name)
         } else {

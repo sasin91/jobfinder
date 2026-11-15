@@ -12,6 +12,7 @@
 //! A new provider is one more adapter and one more arm in Adapter.
 
 pub mod anthropic;
+pub mod billing;
 pub mod llm_exception;
 pub mod llm_response;
 pub mod openai;
@@ -92,6 +93,17 @@ pub struct Llm {
 }
 
 impl Llm {
+    pub(crate) fn track_billing(mut self, billing: &billing::Billing) -> Self {
+        match &mut self.adapter {
+            Adapter::Openai(adapter) if adapter.base_url == openai::BASE_URL => {
+                adapter.billing = Some(billing.clone());
+            }
+            Adapter::Anthropic(adapter) => adapter.billing = Some(billing.clone()),
+            Adapter::Openai(_) => {}
+        }
+        self
+    }
+
     /// Calls on the user's own key. model "" is the provider's USER_DEFAULT_MODELS entry;
     /// base_url is only read for a local server, so an OpenAI or Anthropic key only goes to its
     /// own provider.

@@ -18,6 +18,7 @@ use crate::game_mode::GameMode;
 use crate::job_sites::signed_in::SignedInBrowser;
 use crate::laya::laya_client::LayaClient;
 use crate::llama::llama_server::LlamaServer;
+use crate::llm::billing::Billing;
 use crate::matches::match_model::SortOrder;
 use crate::matches::match_service;
 use crate::matches::page_reader::Readers;
@@ -33,6 +34,7 @@ pub struct Context {
     /// (taxonomy_store::reload); a lookup keeps the one it took for as long as it runs.
     taxonomy: RwLock<Arc<Taxonomy>>,
     pub key_vault: KeyVault,
+    pub billing: Billing,
     /// When the pages fetch_job read in its window were fetched, oldest first (unix seconds).
     fetches: Mutex<Vec<i64>>,
     /// The order chosen in Saved matches, also used by the browser's application picker.
@@ -85,6 +87,7 @@ impl Context {
             db,
             taxonomy: RwLock::new(taxonomy),
             key_vault,
+            billing: Billing::default(),
             fetches: Mutex::new(Vec::new()),
             saved_match_sort: RwLock::default(),
             extension_folder: Err("The extension wasn't written out.".to_string()),

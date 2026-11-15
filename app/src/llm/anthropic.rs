@@ -5,6 +5,7 @@
 
 use serde_json::{Value, json};
 
+use super::billing::{Billing, Provider};
 use super::{Effort, LlmException, LlmResponse};
 
 /// Anthropic's API.
@@ -30,6 +31,7 @@ pub struct Anthropic {
     pub model: String,
     pub base_url: String,
     client: reqwest::Client,
+    pub(super) billing: Option<Billing>,
 }
 
 impl Anthropic {
@@ -40,6 +42,7 @@ impl Anthropic {
             model: model.to_string(),
             base_url: base_url.to_string(),
             client: super::http_client(base_url)?,
+            billing: None,
         })
     }
 
@@ -108,8 +111,16 @@ impl Anthropic {
         let answer = super::post(&self.client, &url, &headers, body)
             .await
             .map_err(|e| super::not_answered(NAME, &self.base_url, &e))?;
-        if answer.status < 400 && answer.is_json() {
+        let accepted = (200..300).contains(&answer.status) && answer.is_json();
+        let blocked = Provider::Anthropic.blocked(&answer);
+        if let Some(billing) = &self.billing {
+            billing.observe(Provider::Anthropic, blocked, accepted);
+        }
+        if accepted {
             return Ok(answer);
+        }
+        if blocked {
+            return Err(super::failed(NAME, answer));
         }
         Err(match answer.status {
             401 => super::rejected_key(NAME, answer),

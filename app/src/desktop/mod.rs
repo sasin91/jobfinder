@@ -51,6 +51,7 @@ use crate::dashboard::{self, Dashboard, Findings, Health, Work};
 use crate::game_mode::Playing;
 use crate::job_scan::scan_service;
 use crate::laya::laya_client::LayaState;
+use crate::llm::billing::Provider;
 use crate::notifications::notification_model;
 
 pub use startup::{run, show_failure};
@@ -154,6 +155,9 @@ pub enum Message {
     Loaded(Arc<Read>),
     /// Goes to the place a link names by its path, as the work's links give it (place_for).
     OpenPage(String),
+    OpenWeb(String),
+    BillingChanged,
+    DismissBilling(Provider),
     Do(Work),
     Said(String),
     /// A second start asked for the window.
@@ -211,6 +215,7 @@ fn boot(launch: Launch, staged_update: Sender<Staged>) -> (Shell, Task<Message>)
     let clicks = notification_clicks(&context);
     let detected = context.game_mode.detected();
     let detected_game = detected.borrow().clone();
+    let billing_changes = context.billing.changes();
     let shell = Shell {
         context,
         runtime,
@@ -240,6 +245,13 @@ fn boot(launch: Launch, staged_update: Sender<Staged>) -> (Shell, Task<Message>)
         Task::run(received(reload_ticks), |()| Message::Reload),
         check_for_updates,
         Task::run(received(clicks), Message::NotificationClicked),
+        Task::run(
+            iced::futures::stream::unfold(billing_changes, |mut changes| async {
+                changes.changed().await.ok()?;
+                Some(((), changes))
+            }),
+            |()| Message::BillingChanged,
+        ),
         Task::run(
             iced::futures::stream::unfold(detected, |mut detected| async {
                 detected.changed().await.ok()?;
@@ -547,6 +559,13 @@ fn handle(shell: &mut Shell, message: Message) -> Task<Message> {
             shell.drawer_open = false;
             return Task::done(Message::OpenPage(link));
         }
+        Message::Notifications(notification_drawer::Msg::OpenWeb(url)) | Message::OpenWeb(url) => {
+            if let Err(error) = open_in_browser(&url) {
+                shell.said = Some(error);
+            }
+        }
+        Message::BillingChanged => {}
+        Message::DismissBilling(provider) => shell.context.billing.dismiss(provider),
         Message::Notifications(msg) => {
             let runner = shell.runner();
             return notification_drawer::update(&mut shell.notifications, msg, &runner).map(Message::Notifications);
@@ -813,7 +832,9 @@ fn view(shell: &Shell) -> Element<'_, Message> {
     } else {
         page
     };
+    let banners = Column::with_children(shell.context.billing.active().map(billing_banner));
     let main = column![
+        banners,
         page,
         status_line(
             &shell.status,
@@ -827,6 +848,29 @@ fn view(shell: &Shell) -> Element<'_, Message> {
         .height(Fill)
         .style(style::page)
         .into()
+}
+
+fn billing_banner(provider: Provider) -> Element<'static, Message> {
+    container(
+        row![
+            style::mark(Health::Attention),
+            text(format!("{} API billing needs attention", provider.name()))
+                .size(style::BODY_SIZE)
+                .width(Fill),
+            button(text("Top up credits").size(style::BODY_SIZE))
+                .style(style::link_button)
+                .on_press(Message::OpenWeb(provider.url().to_string())),
+            button(text("Dismiss").size(style::BODY_SIZE))
+                .style(style::subtle_button(false))
+                .on_press(Message::DismissBilling(provider)),
+        ]
+        .spacing(8)
+        .align_y(Center),
+    )
+    .padding([8.0, PADDING])
+    .width(Fill)
+    .style(style::warning_bar)
+    .into()
 }
 
 /// The match details' footer (matching::footer), across the page under a hairline, its buttons
