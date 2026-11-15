@@ -74,12 +74,23 @@ pub async fn sorted_saved_matches(
     after: &str,
     sort: SortOrder,
 ) -> Result<SavedMatchList, ServiceError> {
+    search_saved_matches(context, list, after, sort, "").await
+}
+
+/// A batch of saved matches whose job title or company contains the search text.
+pub async fn search_saved_matches(
+    context: &Context,
+    list: Option<&str>,
+    after: &str,
+    sort: SortOrder,
+    search: &str,
+) -> Result<SavedMatchList, ServiceError> {
     let list = LISTS
         .iter()
         .map(|(name, ..)| *name)
         .find(|name| list == Some(*name))
         .unwrap_or(SHORTLIST);
-    let found = match_model::list_matches(context.db(), PER_PAGE, after, list, sort).await?;
+    let found = match_model::search_matches(context.db(), PER_PAGE, after, list, sort, search.trim()).await?;
     Ok(SavedMatchList {
         matches: found.rows.iter().map(SavedMatchRow::from).collect(),
         next_after: found.next,

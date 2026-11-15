@@ -427,8 +427,21 @@ pub async fn list_matches(
     list: &str,
     sort_order: SortOrder,
 ) -> sqlx::Result<Batch> {
+    search_matches(db, limit, after, list, sort_order, "").await
+}
+
+/// A batch matching the search in the selected list and order.
+/// The cursor must come from a batch with the same list, order, and search.
+pub(super) async fn search_matches(
+    db: &SqlitePool,
+    limit: usize,
+    after: &str,
+    list: &str,
+    sort_order: SortOrder,
+    search: &str,
+) -> sqlx::Result<Batch> {
     // One more than the batch, to tell whether another batch follows.
-    let mut rows = list_rows(db, limit as i64 + 1, after, list, sort_order).await?;
+    let mut rows = list_rows(db, limit as i64 + 1, after, list, sort_order, search).await?;
     let mut next = None;
     if rows.len() > limit {
         rows.truncate(limit);
@@ -449,7 +462,7 @@ pub async fn list_matches(
 
 /// The full shortlist for the browser's application picker. SQLite's LIMIT -1 reads all rows.
 pub(super) async fn shortlist(db: &SqlitePool, sort: SortOrder) -> sqlx::Result<Vec<ListedMatch>> {
-    list_rows(db, -1, "", SHORTLIST, sort).await
+    list_rows(db, -1, "", SHORTLIST, sort, "").await
 }
 
 async fn list_rows(
@@ -458,6 +471,7 @@ async fn list_rows(
     after: &str,
     list: &str,
     sort: SortOrder,
+    search: &str,
 ) -> sqlx::Result<Vec<ListedMatch>> {
     let place = score_cursor::place(after);
     let after_score = place.as_ref().map(|place| place.score);
@@ -475,6 +489,7 @@ async fn list_rows(
         after_id,
         limit,
         sort as i32,
+        search,
     )
     .fetch_all(db)
     .await?;
@@ -1177,6 +1192,25 @@ mod tests {
         let (second, next) = ids(&db, "all", 2, &next.unwrap()).await;
         assert_eq!(second, [3, 5]);
         assert_eq!(ids(&db, "all", 2, &next.unwrap()).await, (vec![6], None));
+    }
+
+    #[tokio::test]
+    async fn search_filters_the_selected_list_before_paging() {
+        let db = db::open_in_memory().await.unwrap();
+        db.execute(sqlx::raw_sql(SEED)).await.unwrap();
+        db.execute("UPDATE matches SET company = 'Applied Research' WHERE id IN (4, 6)")
+            .await
+            .unwrap();
+
+        let first = search_matches(&db, 1, "", "all", SortOrder::Best, "aPpLiEd")
+            .await
+            .unwrap();
+        assert_eq!(first.rows[0].id, 1);
+        let second = search_matches(&db, 2, &first.next.unwrap(), "all", SortOrder::Best, "aPpLiEd")
+            .await
+            .unwrap();
+        assert_eq!(second.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [2, 6]);
+        assert!(second.next.is_none());
     }
 
     #[tokio::test]

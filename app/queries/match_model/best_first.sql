@@ -2,7 +2,7 @@
 -- ?1 the integration the Jobnet joblog is kept under, ?2 the list,
 -- ?3 the applied statuses as a JSON array (APPLIED_STATUSES),
 -- ?4 ?5 ?6 the score, created_at and id of the row the batch comes after (all NULL for the first),
--- ?7 how many, ?8 the sort order (0 best, 1 newest, 2 oldest).
+-- ?7 how many, ?8 the sort order (0 best, 1 newest, 2 oldest), ?9 the search text.
 -- Selects what recent.sql selects, so both read into ListedRow.
 SELECT
   m.id,
@@ -72,6 +72,7 @@ WHERE CASE ?2
       m.rejected_at IS NULL
       AND m.closed_at IS NULL
   END
+  AND (?9 = '' OR instr(lower(m.job_title), lower(?9)) > 0 OR instr(lower(m.company), lower(?9)) > 0)
   AND (?6 IS NULL OR CASE ?8
     WHEN 1 THEN (m.created_at, m.id) < (?5, ?6)
     WHEN 2 THEN (m.created_at, m.id) > (?5, ?6)

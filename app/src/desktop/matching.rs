@@ -157,6 +157,7 @@ struct List {
     next_after: Option<String>,
     empty: &'static str,
     sort: SortOrder,
+    search: String,
 }
 
 pub struct State {
@@ -263,6 +264,7 @@ pub enum Msg {
         list: Result<Arc<SavedMatchList>, String>,
     },
     ShowMore,
+    Search(String),
     SavedLoaded {
         request: u64,
         result: Result<Arc<MatchResult>, String>,
@@ -471,6 +473,15 @@ pub fn update(state: &mut State, msg: Msg, runner: &Runner) -> Task<Msg> {
         Msg::ShowMore => {
             if let (Page::List(list), Some(after)) = (state.page, state.list.next_after.clone()) {
                 return load_list(state, list, after, runner);
+            }
+        }
+        Msg::Search(search) => {
+            if let Page::List(list) = state.page {
+                let changed = state.list.search.trim() != search.trim();
+                state.list.search = search;
+                if changed {
+                    return reload_list(state, list, runner);
+                }
             }
         }
         Msg::SavedLoaded { result, .. } => {
@@ -868,12 +879,13 @@ fn reload_list(state: &mut State, list: &'static str, runner: &Runner) -> Task<M
 
 fn load_list(state: &mut State, list: &'static str, after: String, runner: &Runner) -> Task<Msg> {
     let sort = state.list.sort;
+    let search = state.list.search.clone();
     state.request += 1;
     let request = state.request;
     let more = !after.is_empty();
     runner.run(
         move |context| async move {
-            match_service::sorted_saved_matches(&context, Some(list), &after, sort)
+            match_service::search_saved_matches(&context, Some(list), &after, sort, &search)
                 .await
                 .map(Arc::new)
         },
@@ -1578,6 +1590,11 @@ fn list_view<'a>(state: &'a State, current: &'static str) -> Element<'a, Msg> {
     )
     .text_size(style::BODY_SIZE)
     .style(style::pick_field);
+    let search = text_input("Search by job title or company", &state.list.search)
+        .on_input(Msg::Search)
+        .size(style::BODY_SIZE)
+        .padding(8)
+        .style(style::text_field);
     let mut page = Column::new()
         .spacing(GAP * 1.5)
         .push(widgets::page_title(
@@ -1588,7 +1605,8 @@ fn list_view<'a>(state: &'a State, current: &'static str) -> Element<'a, Msg> {
             row![container(tabs).width(Fill), sort_select, check_open]
                 .spacing(12)
                 .align_y(Center),
-        );
+        )
+        .push(search);
     if let Some(bar) = said_bar(state) {
         page = page.push(bar);
     }
@@ -1596,7 +1614,12 @@ fn list_view<'a>(state: &'a State, current: &'static str) -> Element<'a, Msg> {
         None => widgets::note("Reading the saved matches…"),
         Some(Err(why)) => widgets::message_bar(Health::Attention, why.as_str()),
         Some(Ok(())) if state.list.rows.is_empty() => {
-            widgets::card(drawings::empty(&drawings::FINDS, state.list.empty))
+            let message = if state.list.search.trim().is_empty() {
+                state.list.empty
+            } else {
+                "No matches found. Try a different job title or company."
+            };
+            widgets::card(drawings::empty(&drawings::FINDS, message))
         }
         Some(Ok(())) => widgets::card(widgets::rows(state.list.rows.iter().map(saved_row))),
     };
