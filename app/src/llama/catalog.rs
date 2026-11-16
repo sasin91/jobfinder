@@ -1,8 +1,6 @@
-//! The models the setup wizard offers to download: Qwen's own GGUF builds of Qwen3, from small to
-//! large, and two picked by hand for a task (account::task_model): Gemma 4 E4B for reading Danish
-//! job posts, and Munin, a Danish-tuned Qwen3.5. The model bake-off (2026-11-02) found Qwen3 4B
-//! reads CVs and judges as well as the bigger ones, so it is the one suggested. Each is weighed with model_choice before it is downloaded, by the size
-//! Hugging Face lists for it.
+//! The download catalog includes general-purpose defaults and candidates for individual tasks.
+//! The 2026-11-02 bake-off found Qwen3 4B reads CVs and judges matches as well as larger models.
+//! Hardware fit is estimated before download using the file size listed on Hugging Face.
 
 use std::path::Path;
 
@@ -55,7 +53,7 @@ pub const GEMMA_4_E4B: &str = "gemma-4-E4B-it-Q4_K_M.gguf";
 pub const GRANITE_4_1_3B: &str = "granite-4.1-3b-Q4_K_M.gguf";
 
 /// The models offered, smallest first.
-pub const MODELS: [CatalogModel; 7] = [
+pub const MODELS: [CatalogModel; 8] = [
     CatalogModel {
         repo: "Qwen/Qwen3-1.7B-GGUF",
         file: "Qwen3-1.7B-Q8_0.gguf",
@@ -110,6 +108,14 @@ pub const MODELS: [CatalogModel; 7] = [
         fits_every_task: false,
     },
     CatalogModel {
+        repo: "ConwayResearch/Underdog-Saluki-27B-1.0",
+        file: "Underdog-Saluki-27B-1.0-IQ2-mix.gguf",
+        label: "Underdog Saluki 27B IQ2: candidate for judging matches",
+        bytes: 7_898_369_152,
+        layers: 64,
+        fits_every_task: false,
+    },
+    CatalogModel {
         repo: "Qwen/Qwen3-14B-GGUF",
         file: "Qwen3-14B-Q4_K_M.gguf",
         label: "Qwen3 14B: larger alternative; evaluate before switching",
@@ -153,8 +159,8 @@ mod tests {
     }
 
     #[test]
-    fn the_smallest_model_isnt_good_enough_and_the_rest_are() {
+    fn only_evaluated_models_are_good_enough() {
         let good: Vec<bool> = MODELS.iter().map(is_good_enough).collect();
-        assert_eq!(good, [false, false, true, true, true, true, true]);
+        assert_eq!(good, [false, false, true, true, true, true, false, true]);
     }
 }
