@@ -1702,6 +1702,15 @@ fn result_view<'a>(
         view = view.push(reject_card(shown, reject, busy));
     }
     view = view.extend(job_post);
+    let post = result.job_text.trim();
+    if !post.is_empty() {
+        view = view.push(widgets::section(
+            "Job ad",
+            container(text(post).size(style::BODY_SIZE))
+                .padding(CARD_PADDING)
+                .into(),
+        ));
+    }
     if let Some(disqualifier) = &result.disqualifier {
         let mut lines = column![
             text(disqualifier.heading)

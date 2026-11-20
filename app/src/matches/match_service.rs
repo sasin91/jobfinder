@@ -181,6 +181,7 @@ pub async fn quick_match(
         saved_id: None,
         laya: &laya,
         job_url,
+        job_text,
     };
     let writer = llm_key::ai_uses(context).await?.any();
     Ok(MatchResult::from(&fresh, writer, None, "").with_cv_found(&profile))
@@ -659,6 +660,7 @@ pub async fn ai_match_result(
         saved_id: found.saved_id,
         laya: &found.laya_reading,
         job_url: &request.job_url,
+        job_text: &request.job_text,
     };
     let laya_input = ai_match::laya_input(
         &request.job,

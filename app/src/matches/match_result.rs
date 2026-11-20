@@ -164,6 +164,7 @@ pub struct Fresh<'a> {
     pub laya: &'a LayaReading,
     /// Where the post was read from; empty for a pasted post.
     pub job_url: &'a str,
+    pub job_text: &'a str,
 }
 
 impl MatchResult {
@@ -192,7 +193,7 @@ impl MatchResult {
             laya_input: laya_input.to_string(),
             documents,
             job_url: fresh.job_url.to_string(),
-            job_text: String::new(),
+            job_text: fresh.job_text.to_string(),
             cv_found: None,
             applied_on: String::new(),
         }
