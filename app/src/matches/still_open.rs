@@ -37,9 +37,10 @@ pub const PAUSE_BETWEEN_READS: Duration = Duration::from_secs(2);
 const READ_TIME_LIMIT: Duration = Duration::from_secs(90);
 
 /// What the sites write on a post that no longer takes applications, in lower case.
-const CLOSED_PHRASES: [&str; 14] = [
+const CLOSED_PHRASES: [&str; 16] = [
     "annoncen er udløbet",
     "annoncen er ikke længere aktiv",
+    "jobannoncen ikke længere er aktuel",
     "jobbet er ikke længere aktivt",
     "opslaget er udløbet",
     "stillingen er besat",
@@ -47,6 +48,7 @@ const CLOSED_PHRASES: [&str; 14] = [
     "ansøgningsfristen er udløbet",
     "no longer accepting applications",
     "this job has expired",
+    "this job ad has expired",
     "this job is no longer available",
     "this job posting has expired",
     "this position has been filled",
@@ -195,7 +197,9 @@ pub async fn read_post(url: &str, readers: Readers<'_>) -> Finding {
             None => Finding::Unknown("JobFinder's signed-in browser couldn't read it.".to_string()),
         };
     }
-    match page_reader::get_or_status(url, &page_reader::PAGE).await {
+    let resolved = job_sites::jobindex::post_link(url);
+    let fetch_url = resolved.as_deref().unwrap_or(url);
+    match page_reader::get_or_status(fetch_url, &page_reader::PAGE).await {
         Ok(Got::Page(fetched)) => match page_reader::to_text(&fetched.body, &fetched.content_type, &fetched.url) {
             Ok(page) => judge_page(url, &fetched.url, &page.text),
             Err(why) => Finding::Unknown(why),
@@ -435,6 +439,10 @@ mod tests {
         );
         assert_eq!(
             judge_page(url, url, "No longer accepting applications"),
+            Finding::Closed(Closed::SaysClosed)
+        );
+        assert_eq!(
+            judge_page(url, url, "Please note that this job ad has expired."),
             Finding::Closed(Closed::SaysClosed)
         );
         assert_eq!(judge_page(url, url, &long), Finding::Open);

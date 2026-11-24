@@ -124,10 +124,12 @@ pub fn is_signed_in_post(url: &str) -> bool {
     linkedin::post_link(url).is_some() || indeed::post_link(url).is_some()
 }
 
-/// A post's link as its site always writes it (LinkedIn's and Indeed's, however they were
-/// found), so the same post found twice is one post; other links as they are.
+/// A post's link as its site always writes it (Jobindex's, LinkedIn's and Indeed's, however they
+/// were found), so the same post found twice is one post and Jobindex's /vis-job/ teasers go to
+/// the full /jobannonce/ post; other links as they are.
 pub fn post_link(url: &str) -> String {
-    linkedin::post_link(url)
+    jobindex::post_link(url)
+        .or_else(|| linkedin::post_link(url))
         .or_else(|| indeed::post_link(url))
         .unwrap_or_else(|| url.trim().to_string())
 }
@@ -181,5 +183,13 @@ mod tests {
         assert!(is_signed_in_post("https://www.linkedin.com/jobs/view/4012345678/"));
         assert!(is_signed_in_post("https://dk.indeed.com/viewjob?jk=0123456789abcdef"));
         assert!(!is_signed_in_post("https://www.jobindex.dk/vis-job/h1"));
+    }
+
+    #[test]
+    fn post_link_rewrites_jobindex_teasers_to_jobannonce() {
+        assert_eq!(
+            post_link("https://www.jobindex.dk/vis-job/h1710286"),
+            "https://www.jobindex.dk/jobannonce/h1710286"
+        );
     }
 }

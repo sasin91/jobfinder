@@ -1620,12 +1620,21 @@ pub async fn add_page(
             "JobFinder has no job search to add the post to. Make one in JobFinder first (Settings, Job searches).",
         )
     })?;
+    // Jobindex's /vis-job/ page is only a teaser: fetch the full /jobannonce/ post instead of
+    // keeping the teaser HTML the browser showed.
+    let is_teaser = crate::job_sites::jobindex::is_teaser(url);
     let url = crate::job_sites::post_link(url);
-    let page = crate::job_sites::sent_page(&url, html).map_err(|why| ServiceError::new(ErrorKind::Invalid, why))?;
+    let (title, sent) = if is_teaser {
+        (String::new(), None)
+    } else {
+        let page =
+            crate::job_sites::sent_page(&url, html).map_err(|why| ServiceError::new(ErrorKind::Invalid, why))?;
+        (page.title.clone(), Some(page))
+    };
     let now = chrono::Utc::now().timestamp();
     let post = NewPost {
         url: &url,
-        title: &page.title,
+        title: &title,
         ..NewPost::default()
     };
     let Some(post_id) = model::add_post(db, search_id, None, &post, now).await? else {
@@ -1633,7 +1642,7 @@ pub async fn add_page(
     };
     context.running.clone().spawn(async move {
         let matched = match profile_cv(&context).await {
-            Ok(cv) => match_post_with(&context, post_id, &cv, Some(page)).await,
+            Ok(cv) => match_post_with(&context, post_id, &cv, sent).await,
             Err(e) => Err(e),
         };
         if let Err(e) = matched {

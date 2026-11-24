@@ -212,7 +212,14 @@ pub async fn read(url: &str, readers: Readers<'_>) -> Result<Page, String> {
         Some(Err(why)) => crate::log_line!("page_reader: {url}: the site's own reader failed, reading the page: {why}"),
         None => {}
     }
-    let fetched = get(url, &PAGE).await?;
+    let resolved = crate::job_sites::jobindex::post_link(url);
+    let url = resolved.as_deref().unwrap_or(url);
+    let mut fetched = get(url, &PAGE).await?;
+    if crate::job_sites::jobindex::is_teaser(&fetched.url)
+        && let Some(full) = crate::job_sites::jobindex::post_link(&fetched.url)
+    {
+        fetched = get(&full, &PAGE).await?;
+    }
     let page = to_text(&fetched.body, &fetched.content_type, &fetched.url);
     if needs_javascript(&page)
         && let Some(pdf_reader) = readers.pdf_reader

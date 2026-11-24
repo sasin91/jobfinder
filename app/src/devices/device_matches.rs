@@ -194,7 +194,15 @@ fn post_sent(ask: &EvaluateAsk) -> Result<PostSent, ServiceError> {
         if ask.html.len() > MAX_EVALUATE_HTML {
             return Err(ServiceError::new(ErrorKind::TooLarge, "The page is too large to read."));
         }
+        let is_teaser = job_sites::jobindex::is_teaser(url);
         let url = job_sites::post_link(url);
+        if is_teaser {
+            return Ok(PostSent {
+                shown: url.clone(),
+                job_text: url,
+                job_url: String::new(),
+            });
+        }
         let page = job_sites::sent_page(&url, &ask.html).map_err(|why| ServiceError::new(ErrorKind::Invalid, why))?;
         return Ok(PostSent {
             job_text: page.text,
@@ -290,5 +298,17 @@ mod tests {
     #[test]
     fn the_device_shortlist_is_the_apps() {
         assert_eq!(device_protocol::SHORTLIST, SHORTLIST);
+    }
+
+    #[test]
+    fn a_sent_jobindex_teaser_is_fetched_from_jobannonce_instead() {
+        let sent = post_sent(&EvaluateAsk {
+            url: "https://www.jobindex.dk/vis-job/h1710286".to_string(),
+            html: "<html><body><p>Short teaser</p></body></html>".to_string(),
+            text: String::new(),
+        })
+        .unwrap();
+        assert_eq!(sent.job_text, "https://www.jobindex.dk/jobannonce/h1710286");
+        assert!(sent.job_url.is_empty());
     }
 }
