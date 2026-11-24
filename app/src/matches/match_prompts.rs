@@ -23,6 +23,8 @@ working_language: the language the job is done in, named in English ("Danish", "
 
 level: the career level the post is for, when it says so: "student" (studiejob, studentermedhjælper, elev, lærling), "intern" (praktik, internship), "graduate" (nyuddannet, trainee), "junior", "senior" or "lead" (lead, principal, teamleder); empty when it states none or several.
 
+field: the role's functional field or discipline in English, a few words ("software development", "civil construction, earthworks and sewer", "elder care", "retail"). Name the role's own craft rather than the employer's industry when they differ (a software developer at a construction company is "software development"); empty when the post doesn't say.
+
 responsibilities: at most 6, a few words each.
 job_title_en and english: the job title and each value in English (the same text when it already is English)."#;
 
@@ -35,12 +37,24 @@ location: where the candidate lives, as the CV gives it (town and postcode as wr
 Include the languages the CV is written in or names.
 text_en: the whole CV as plain English text, translated if it is in another language, otherwise as given; keep every fact, drop layout."#;
 
-const JUDGE: &str = r#"You judge whether a candidate meets job requirements, from their CV alone. For each requirement say:
+const JUDGE: &str = r#"You judge whether a candidate meets job requirements, from their CV alone.
+
+First, compare the fields:
+- candidate_field: the functional field(s) or discipline(s) shown by the CV's work, skills or education, in a few English words (e.g. "software development").
+- job_field: the functional field or discipline of this job role itself, in a few English words — not the employer's industry when the role is in another discipline (a software developer at a construction company is "software development", whereas a project manager for earthworks and sewer is "civil construction, earthworks and sewer").
+- role_field_fit:
+  - "same" when the CV shows work, skills or education in job_field,
+  - "adjacent" when the CV is in a closely related field where core craft transfers (e.g. software development for DevOps, QA automation, solutions architecture or IT project management),
+  - "unrelated" when the job is in a completely different field (e.g. software development vs. construction, civil engineering, earthworks/sewer, healthcare, retail, warehousing or hospitality).
+
+Then, for each requirement say:
 - "met" when the CV shows it (directly, or through something that clearly includes it: Laravel shows PHP),
-- "partial" when the CV shows something close or transferable but not the thing itself (Vue for React, Symfony for Laravel),
+- "partial" when the CV shows something close or transferable in the same or an adjacent field (Vue for React, Symfony for Laravel),
 - "missing" when the CV shows nothing relevant.
 
-For a job title, compare the occupation and domain shown by the CV. An unrelated occupation is missing even if it shares general responsibilities, seniority or language. Judge responsibilities against concrete past duties. Never add the job's duties, industry or working methods to the CV evidence.
+For a job title, both the role and the field must match. It is "met" only for the same or equivalent role in the same field, "partial" only for a related role in the same or an adjacent field, and "missing" whenever role_field_fit is "unrelated".
+Leadership, management, project management and coordination do NOT transfer across unrelated fields: being a tech lead or leading software development is "missing" (neither "met" nor "partial") for leading a team, managing projects or supervising staff in an unrelated field (such as construction, civil engineering, healthcare, retail or logistics), and vice versa.
+Judge responsibilities and experience in the context of job_field against concrete past duties in that field; when role_field_fit is "unrelated", domain-bound and leadership/management responsibilities or experience are "missing". Never add the job's duties, industry or working methods to the CV evidence.
 For a named tool or framework, a different tool can be partial if it is transferable. Kubernetes alone does not demonstrate Docker. Laravel shows PHP, but Laravel alone does not show Symfony when Symfony is required.
 For a minimum number of years, count only relevant dated work or use a stated duration in that exact scope. Count overlapping periods once. Give partial when the CV shows relevant work but the duration is unclear or falls short. Total career years do not establish years in a particular role, activity or technology.
 
@@ -76,6 +90,7 @@ const LANGUAGES_NOT_STATED: &str = "none stated";
 pub struct Undecided {
     pub id: String,
     pub text: String,
+    pub english: Option<String>,
     pub kind: String,
     pub min_years: Option<i64>,
 }
@@ -91,13 +106,20 @@ pub struct Judged {
     pub reason: String,
 }
 
-#[derive(Deserialize)]
-struct Judgement {
+/// The model's judgement on a job's undecided requirements, starting with the field comparison.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Judgement {
     #[serde(default)]
-    verdicts: Vec<Judged>,
+    pub candidate_field: String,
+    #[serde(default)]
+    pub job_field: String,
+    #[serde(default)]
+    pub role_field_fit: String,
+    #[serde(default)]
+    pub verdicts: Vec<Judged>,
 }
 
-/// A job post as { job_title, job_title_en, company, requirements, responsibilities, level,
+/// A job post as { job_title, job_title_en, company, field, requirements, responsibilities, level,
 /// working_language }. The post isn't translated: written first, a translation turned the
 /// requirements' own words English.
 pub async fn read_job(llm: &Llm, text: &str) -> Result<Job, LlmException> {
@@ -134,20 +156,29 @@ pub async fn read_cv(llm: &Llm, text: &str) -> Result<Profile, LlmException> {
 /// language requirements. cv_text is the original CV when available.
 pub async fn judge(
     llm: &Llm,
-    job_title: &str,
+    job: &Job,
     items: &[Undecided],
     cv_text: &str,
     location: &str,
     languages: &[String],
-) -> Result<Vec<Judged>, LlmException> {
+) -> Result<Judgement, LlmException> {
+    let user = judge_user_prompt(job, items, cv_text, location, languages);
+    let answer = llm
+        .structured(JUDGE, &user, &judge_schema(), Effort::Medium, JUDGE_TOKENS)
+        .await?;
+    shaped::<Judgement>(answer, "verdicts")
+}
+
+fn judge_user_prompt(job: &Job, items: &[Undecided], cv_text: &str, location: &str, languages: &[String]) -> String {
     let list = items
         .iter()
         .map(|item| {
+            let english = english_suffix(&item.text, item.english.as_deref());
             let minimum = item
                 .min_years
                 .filter(|&years| years > 0)
                 .map_or_else(String::new, |years| format!(" (minimum {years} years in this scope)"));
-            format!("- [{}] ({}) {}{minimum}", item.id, item.kind, item.text)
+            format!("- [{}] ({}) {}{english}{minimum}", item.id, item.kind, item.text)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -157,13 +188,34 @@ pub async fn judge(
         location
     };
     let spoken = spoken_languages(languages);
-    let user = format!(
-        "Job title: {job_title}\nThe candidate lives in: {lives}\nThe candidate's languages: {spoken}\n\nRequirements:\n{list}\n\nCV:\n\n{cv_text}"
-    );
-    let answer = llm
-        .structured(JUDGE, &user, &judge_schema(), Effort::Medium, JUDGE_TOKENS)
-        .await?;
-    Ok(shaped::<Judgement>(answer, "verdicts")?.verdicts)
+    let mut header = vec![format!(
+        "Job title: {}{}",
+        job.job_title,
+        english_suffix(&job.job_title, Some(&job.job_title_en))
+    )];
+    let field = job.field.trim();
+    if !field.is_empty() {
+        header.push(format!("Job field: {field}"));
+    }
+    let company = job.company.trim();
+    if !company.is_empty() {
+        header.push(format!("Company: {company}"));
+    }
+    header.push(format!("The candidate lives in: {lives}"));
+    header.push(format!("The candidate's languages: {spoken}"));
+    format!("{}\n\nRequirements:\n{list}\n\nCV:\n\n{cv_text}", header.join("\n"))
+}
+
+/// " (English: ...)" when an English translation is present and differs from the original text.
+fn english_suffix(original: &str, english: Option<&str>) -> String {
+    let Some(english) = english.map(str::trim).filter(|en| !en.is_empty()) else {
+        return String::new();
+    };
+    if english.eq_ignore_ascii_case(original.trim()) {
+        String::new()
+    } else {
+        format!(" (English: {english})")
+    }
 }
 
 /// The candidate's languages as judge() names them: "Dansk, Engelsk", or LANGUAGES_NOT_STATED.
@@ -212,11 +264,12 @@ fn job_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["job_title", "job_title_en", "company", "requirements", "responsibilities", "level", "working_language"],
+        "required": ["job_title", "job_title_en", "company", "field", "requirements", "responsibilities", "level", "working_language"],
         "properties": {
             "job_title": { "type": "string" },
             "job_title_en": { "type": "string" },
             "company": { "type": "string" },
+            "field": { "type": "string" },
             "requirements": { "type": "array", "items": requirement },
             "responsibilities": strings(),
             "level": { "type": "string", "enum": level_choices() },
@@ -254,8 +307,11 @@ fn judge_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["verdicts"],
+        "required": ["candidate_field", "job_field", "role_field_fit", "verdicts"],
         "properties": {
+            "candidate_field": { "type": "string" },
+            "job_field": { "type": "string" },
+            "role_field_fit": { "type": "string", "enum": ["same", "adjacent", "unrelated"] },
             "verdicts": {
                 "type": "array",
                 "items": {
@@ -283,5 +339,55 @@ mod tests {
         let languages = vec!["Dansk".to_string(), " ".to_string(), "Engelsk".to_string()];
         assert_eq!(spoken_languages(&languages), "Dansk, Engelsk");
         assert_eq!(spoken_languages(&[]), LANGUAGES_NOT_STATED);
+    }
+
+    #[test]
+    fn the_judge_prompt_includes_english_title_field_and_company() {
+        let job = Job {
+            job_title: "Projektleder til jord/kloak og anlæg".into(),
+            job_title_en: "Project manager for earthworks, sewer and civil engineering".into(),
+            field: "civil construction, earthworks and sewer".into(),
+            company: "Jysk Erhverv & Råhus A/S".into(),
+            ..Job::default()
+        };
+        let items = [
+            Undecided {
+                id: "t0".into(),
+                text: job.job_title.clone(),
+                english: Some(job.job_title_en.clone()),
+                kind: "title".into(),
+                min_years: None,
+            },
+            Undecided {
+                id: "w0".into(),
+                text: "Danish".into(),
+                english: Some("Danish".into()),
+                kind: "language".into(),
+                min_years: None,
+            },
+        ];
+        let prompt = judge_user_prompt(&job, &items, "Tech Lead", "", &["Danish".into()]);
+        assert!(prompt.contains(
+            "Job title: Projektleder til jord/kloak og anlæg (English: Project manager for earthworks, sewer and civil engineering)"
+        ));
+        assert!(prompt.contains("Job field: civil construction, earthworks and sewer"));
+        assert!(prompt.contains("Company: Jysk Erhverv & Råhus A/S"));
+        assert!(prompt.contains(
+            "- [t0] (title) Projektleder til jord/kloak og anlæg (English: Project manager for earthworks, sewer and civil engineering)"
+        ));
+        assert!(prompt.contains("- [w0] (language) Danish\n"));
+        assert!(!prompt.contains("(English: Danish)"));
+    }
+
+    #[test]
+    fn judge_schema_compares_fields_before_verdicts() {
+        let schema = judge_schema();
+        let keys: Vec<&str> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["candidate_field", "job_field", "role_field_fit", "verdicts"]);
     }
 }

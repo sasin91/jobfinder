@@ -264,8 +264,9 @@ impl<'a> FreeReader<'a> {
             responsibilities: Vec::new(),
             // Read from the title by seniority::with_level, as for a model's read.
             level: String::new(),
-            // The free reader can't tell which language a post is in.
+            // The free reader can't tell which language or functional field a post is in.
             working_language: String::new(),
+            field: String::new(),
         }
     }
 

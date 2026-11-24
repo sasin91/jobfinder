@@ -69,6 +69,10 @@ pub struct Job {
     /// requirement the candidate must speak.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub working_language: String,
+    /// The role's functional field or discipline in English ("software development",
+    /// "civil construction, earthworks and sewer"), when read by a model.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub field: String,
 }
 
 /// One thing a job post asks for. Requirements sharing an `alt_group` are alternatives

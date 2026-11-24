@@ -138,14 +138,32 @@ fn cv_answer() -> Value {
 
 /// Every requirement the user message lists ("- [id] (kind) text") as met.
 fn judged(user: &str) -> Value {
+    let unrelated = user.contains("earthworks");
+    let evidence = if unrelated {
+        "Led development in close collaboration with the CTO"
+    } else {
+        "Built payment flows"
+    };
     let verdicts: Vec<Value> = user
         .lines()
         .filter_map(|line| line.strip_prefix("- [")?.split(']').next())
-        .map(
-            |id| json!({ "id": id, "verdict": "met", "evidence": "Built payment flows", "reason": "Shown in the CV." }),
-        )
+        .map(|id| json!({ "id": id, "verdict": "met", "evidence": evidence, "reason": "Shown in the CV." }))
         .collect();
-    json!({ "verdicts": verdicts })
+    if unrelated {
+        json!({
+            "candidate_field": "software development",
+            "job_field": "civil construction, earthworks and sewer",
+            "role_field_fit": "unrelated",
+            "verdicts": verdicts,
+        })
+    } else {
+        json!({
+            "candidate_field": "software development",
+            "job_field": "software development",
+            "role_field_fit": "same",
+            "verdicts": verdicts,
+        })
+    }
 }
 
 fn resume_answer() -> Value {
@@ -414,4 +432,73 @@ fn said(by: By, text: &str) -> Said {
         by,
         text: text.to_string(),
     }
+}
+
+#[tokio::test]
+async fn an_unrelated_field_leadership_role_never_matches_a_tech_lead() {
+    let (context, ..) = with_model().await;
+    let cv_text = "Tech Lead\nLed development in close collaboration with the CTO, incorporating regular feedback and code review\nKørekort B";
+    let profile = jobfinder::matches::Profile {
+        title: vec!["Tech Lead".into(), "Team Lead".into()],
+        skill: vec!["PHP".into(), "Kørekort B".into()],
+        language: vec!["Danish".into()],
+        ..Default::default()
+    };
+
+    // Case 1: The exact teaser-ad scenario (only title + working language).
+    let teaser = MatchRequest {
+        job: jobfinder::matches::Job {
+            job_title: "Projektleder til jord/kloak og anlæg".into(),
+            job_title_en: "Project manager for earthworks, sewer and civil engineering".into(),
+            company: "Jysk Erhverv & Råhus A/S".into(),
+            field: "civil construction, earthworks and sewer".into(),
+            working_language: "Danish".into(),
+            ..Default::default()
+        },
+        profile: profile.clone(),
+        job_text: "Projektleder til jord/kloak og anlæg".into(),
+        cv_text: cv_text.into(),
+        ..Default::default()
+    };
+    let found = match_service::ai_match(&context, &teaser).await.unwrap();
+    assert_eq!(found.verdicts["t0"].verdict, "missing");
+    assert_eq!(found.result.index, 0.0);
+    assert_eq!(found.result.tag, "poor");
+
+    // Case 2: Generic title ("Teamleder") that taxonomy shares with "Team Lead", plus a generic
+    // requirement ("Kørekort B"): the title still goes to the model and the unrelated field caps
+    // the score below medium.
+    let generic = MatchRequest {
+        job: jobfinder::matches::Job {
+            job_title: "Teamleder".into(),
+            job_title_en: "Team leader".into(),
+            company: "Jysk Erhverv & Råhus A/S".into(),
+            field: "civil construction, earthworks and sewer".into(),
+            requirements: vec![jobfinder::matches::Requirement {
+                value: "Kørekort B".into(),
+                english: "Driving license B".into(),
+                kind: "skill".into(),
+                required: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        profile,
+        job_text: "Teamleder til jord/kloak og anlæg".into(),
+        cv_text: cv_text.into(),
+        ..Default::default()
+    };
+    let capped = match_service::ai_match(&context, &generic).await.unwrap();
+    assert_eq!(capped.verdicts["t0"].by, "llm");
+    assert_eq!(capped.verdicts["t0"].verdict, "missing");
+    assert_eq!(capped.result.index, jobfinder::matches::matcher::DISQUALIFIED_INDEX);
+    assert_eq!(capped.result.tag, "poor");
+    assert!(
+        capped
+            .result
+            .feedback_note
+            .as_deref()
+            .unwrap_or("")
+            .contains("different field")
+    );
 }

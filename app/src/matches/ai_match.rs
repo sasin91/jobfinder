@@ -9,8 +9,8 @@ use sqlx::SqlitePool;
 
 use super::apply_instructions::{self, ApplyInstructions};
 use super::match_model::{self, NewMatch};
-use super::match_prompts::{self, Undecided};
-use super::matcher::{self, Groups, LANGUAGE, LOCATION, Matcher, Score, Verdict, Verdicts};
+use super::match_prompts::{self, Judgement, Undecided};
+use super::matcher::{self, Groups, LANGUAGE, LOCATION, Matcher, Score, TITLE, Verdict, Verdicts};
 use super::{Job, KnownTerm, Profile, rejection_feedback};
 use crate::laya::laya_client::{self, LayaClient, LayaReading};
 use crate::llm::{Llm, LlmException};
@@ -70,18 +70,27 @@ pub async fn ai_match(
     let mut verdicts = Verdicts::new();
     let mut undecided = Vec::new();
     for unit in matcher::units(&groups) {
-        match matcher.decide(unit) {
+        // With a model available, judge the job title in context of the role's field so generic
+        // leadership titles ("Teamleder", "Projektleder") never auto-match across unrelated fields.
+        let decided = if llm.is_some() && unit.kind == TITLE {
+            None
+        } else {
+            matcher.decide(unit)
+        };
+        match decided {
             Some(verdict) => {
                 verdicts.insert(unit.id.clone(), verdict);
             }
             None => undecided.push(Undecided {
                 id: unit.id.clone(),
                 text: unit.text.clone(),
+                english: unit.english.clone(),
                 kind: unit.kind.clone(),
                 min_years: unit.min_years,
             }),
         }
     }
+    let mut field_mismatch = None;
     match llm {
         Some(llm) if !undecided.is_empty() => {
             let cv_text = if new.cv_text.trim().is_empty() {
@@ -89,21 +98,22 @@ pub async fn ai_match(
             } else {
                 new.cv_text
             };
-            let judged = match_prompts::judge(
+            let judgement = match_prompts::judge(
                 llm,
-                &job.job_title,
+                job,
                 &undecided,
                 cv_text,
                 profile.location.trim(),
                 &profile.language,
             )
             .await?;
+            field_mismatch = unrelated_field_reason(&judgement);
             // Only the requirements it was asked about: an id it made up, or one the taxonomy
             // decided, would put its verdict on the wrong requirement.
             let cv_for_evidence = evidence_text(cv_text);
             for unit in undecided {
-                if let Some(answer) = judged.iter().find(|answer| answer.id == unit.id) {
-                    let verdict = grounded_verdict(&unit, answer, &cv_for_evidence);
+                if let Some(answer) = judgement.verdicts.iter().find(|answer| answer.id == unit.id) {
+                    let verdict = grounded_verdict(&unit, answer, &cv_for_evidence, field_mismatch.as_deref());
                     verdicts.insert(unit.id, verdict);
                 } else if unit.kind == LOCATION {
                     verdicts.insert(
@@ -129,14 +139,40 @@ pub async fn ai_match(
     } else {
         new.cv_name
     };
-    Ok(score_and_save(matching, NewMatch { cv_name, ..new }, groups, &verdicts).await)
+    Ok(score_and_save(
+        matching,
+        NewMatch { cv_name, ..new },
+        groups,
+        &verdicts,
+        field_mismatch.as_deref(),
+    )
+    .await)
 }
 
 fn evidence_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-fn grounded_verdict(unit: &Undecided, answer: &match_prompts::Judged, cv: &str) -> Verdict {
+fn unrelated_field_reason(judgement: &Judgement) -> Option<String> {
+    if !judgement.role_field_fit.trim().eq_ignore_ascii_case("unrelated") {
+        return None;
+    }
+    let candidate = judgement.candidate_field.trim();
+    let job = judgement.job_field.trim();
+    let reason = match (candidate.is_empty(), job.is_empty()) {
+        (false, false) => format!("The CV is in a different field ({candidate}) than this role ({job})."),
+        (true, false) => format!("The CV does not show experience in this role's field ({job})."),
+        _ => "The CV is in an unrelated field for this role.".to_string(),
+    };
+    Some(reason)
+}
+
+fn grounded_verdict(
+    unit: &Undecided,
+    answer: &match_prompts::Judged,
+    cv: &str,
+    field_mismatch: Option<&str>,
+) -> Verdict {
     let mut verdict = Verdict {
         verdict: answer.verdict.clone(),
         by: "llm".into(),
@@ -144,8 +180,17 @@ fn grounded_verdict(unit: &Undecided, answer: &match_prompts::Judged, cv: &str) 
         evidence: answer.evidence.clone(),
         reason: answer.reason.clone(),
     };
+    if let Some(reason) = field_mismatch
+        && matches!(verdict.verdict.as_str(), "met" | "partial")
+        && matches!(unit.kind.as_str(), TITLE | "responsibility" | "experience")
+    {
+        verdict.verdict = "missing".into();
+        verdict.evidence.clear();
+        verdict.reason = reason.into();
+        return verdict;
+    }
     // Location and language use the structured candidate details, rather than CV excerpts.
-    if matches!(answer.verdict.as_str(), "met" | "partial") && !matches!(unit.kind.as_str(), LOCATION | LANGUAGE) {
+    if matches!(verdict.verdict.as_str(), "met" | "partial") && !matches!(unit.kind.as_str(), LOCATION | LANGUAGE) {
         let quote = evidence_text(answer.evidence.trim().trim_matches(['"', '“', '”', '«', '»']));
         if quote.is_empty() || !cv.contains(&quote) {
             verdict.verdict = "missing".into();
@@ -157,9 +202,22 @@ fn grounded_verdict(unit: &Undecided, answer: &match_prompts::Judged, cv: &str) 
 }
 
 /// The verdicts scored, and saved as the user's match.
-async fn score_and_save(matching: &Matching<'_>, new: NewMatch<'_>, groups: Groups, verdicts: &Verdicts) -> AiMatch {
+async fn score_and_save(
+    matching: &Matching<'_>,
+    new: NewMatch<'_>,
+    groups: Groups,
+    verdicts: &Verdicts,
+    field_mismatch: Option<&str>,
+) -> AiMatch {
     let verdicts = matcher::combine(&groups, verdicts);
     let mut score = matcher::score(&groups, &verdicts);
+    if let Some(reason) = field_mismatch
+        && score.index > matcher::DISQUALIFIED_INDEX
+    {
+        score.index = matcher::DISQUALIFIED_INDEX;
+        score.tag = matcher::match_tag(score.index).to_string();
+        score.feedback_note = Some(reason.to_string());
+    }
     rejection_feedback::adjust(matching.db, new.job, &mut score).await;
     let laya_summary = matcher::laya_summary(new.job, &groups, &verdicts);
     // Laya's own reading of the verdicts, with its model; the score comes back without it if
@@ -244,18 +302,19 @@ mod tests {
     fn a_model_verdict_needs_an_excerpt_from_the_cv() {
         let unit = Undecided {
             id: "a0".into(),
-            text: "Lead a municipal home-care team".into(),
+            text: "Lead a backend engineering team".into(),
+            english: None,
             kind: "responsibility".into(),
             min_years: None,
         };
         let answer = match_prompts::Judged {
             id: unit.id.clone(),
             verdict: "met".into(),
-            evidence: "Led development in the municipal home-care team".into(),
+            evidence: "Led development in the backend engineering team".into(),
             reason: "Shown in the CV.".into(),
         };
         let cv = evidence_text("Software developer\nLed a team of\n four software engineers.");
-        let verdict = grounded_verdict(&unit, &answer, &cv);
+        let verdict = grounded_verdict(&unit, &answer, &cv, None);
         assert_eq!(verdict.verdict, "missing");
         assert!(verdict.evidence.is_empty());
 
@@ -264,6 +323,74 @@ mod tests {
             evidence: "“Led a team of four software engineers”".into(),
             ..answer
         };
-        assert_eq!(grounded_verdict(&unit, &transferable, &cv).verdict, "partial");
+        assert_eq!(grounded_verdict(&unit, &transferable, &cv, None).verdict, "partial");
+    }
+
+    #[test]
+    fn tech_lead_experience_does_not_meet_leadership_roles_in_unrelated_fields() {
+        let judgement = Judgement {
+            candidate_field: "software development".into(),
+            job_field: "civil construction, earthworks and sewer".into(),
+            role_field_fit: "unrelated".into(),
+            verdicts: vec![],
+        };
+        let mismatch = unrelated_field_reason(&judgement).expect("unrelated field");
+        let cv = evidence_text(
+            "Tech Lead\nLed development in close collaboration with the CTO, incorporating regular feedback and code review",
+        );
+
+        // Even if the model mistakenly returns "met" or "partial" using a real CV quote,
+        // grounded_verdict downgrades role-bound items to "missing" when the field is unrelated.
+        for (id, kind, text, model_verdict) in [
+            ("t0", TITLE, "Projektleder til jord/kloak og anlæg", "met"),
+            ("a0", "responsibility", "Lead a municipal home-care team", "partial"),
+            ("r0", "experience", "Erfaring med projektledelse", "met"),
+        ] {
+            let unit = Undecided {
+                id: id.into(),
+                text: text.into(),
+                english: None,
+                kind: kind.into(),
+                min_years: None,
+            };
+            let answer = match_prompts::Judged {
+                id: id.into(),
+                verdict: model_verdict.into(),
+                evidence: "Led development in close collaboration with the CTO, incorporating regular feedback and code review".into(),
+                reason: "Shows leadership in a project role.".into(),
+            };
+            let checked = grounded_verdict(&unit, &answer, &cv, Some(&mismatch));
+            assert_eq!(checked.verdict, "missing", "{kind}: {text}");
+            assert!(checked.evidence.is_empty());
+            assert_eq!(checked.reason, mismatch);
+        }
+
+        // Languages still stand even when the role is in an unrelated field.
+        let language = Undecided {
+            id: "w0".into(),
+            text: "Danish".into(),
+            english: Some("Danish".into()),
+            kind: LANGUAGE.into(),
+            min_years: None,
+        };
+        let danish = match_prompts::Judged {
+            id: "w0".into(),
+            verdict: "met".into(),
+            evidence: "Danish".into(),
+            reason: "The candidate speaks Danish.".into(),
+        };
+        assert_eq!(
+            grounded_verdict(&language, &danish, &cv, Some(&mismatch)).verdict,
+            "met"
+        );
+
+        // Adjacent fields (e.g. software dev -> IT project manager) are not downgraded.
+        let adjacent = Judgement {
+            candidate_field: "software development".into(),
+            job_field: "IT project management".into(),
+            role_field_fit: "adjacent".into(),
+            verdicts: vec![],
+        };
+        assert!(unrelated_field_reason(&adjacent).is_none());
     }
 }
