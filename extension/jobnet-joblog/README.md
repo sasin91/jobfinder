@@ -59,6 +59,17 @@ keeps its name as typed and the postcode is left empty.
 "Hvilken dato har du søgt jobbet?" (only asked at Søgt or Samtale) gets the day
 you set that status in JobFinder.
 
+### Update statuses on Jobnet
+
+When a match that is already in your Jobnet joblog gets a new status in JobFinder
+(for example `Samtale`, `Afslag`, or `Fået job` — whether set in JobFinder's Apply
+screen or detected from Gmail), opening `https://jobnet.dk/joblog` shows an
+"Update statuses on Jobnet" panel listing every entry that is out of sync.
+
+Press **Update** (or **Update all on screen**) to apply the change directly on the
+matching Jobnet card (`Ikke søgt` / `Søgt` / `Samtale` radio buttons, and the
+`Afsluttet` checkbox for `Afslag` and `Fået job`) and mark it synced in JobFinder.
+
 ### Send a job post to JobFinder
 
 On any job post's page (LinkedIn and Indeed too, signed in), press the

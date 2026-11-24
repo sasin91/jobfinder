@@ -34,6 +34,8 @@ SELECT
   ) AS missed_disqualifier,
   j.status AS "jobnet_status?",
   j.logged_at AS jobnet_logged_at,
+  j.logged_status AS "jobnet_logged_status?",
+  j.external_id AS "jobnet_external_id?",
   m.rejected_at,
   m.deadline,
   m.closed_at,

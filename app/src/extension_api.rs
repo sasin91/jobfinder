@@ -51,7 +51,12 @@ pub async fn history(State(state): State<Arc<AppState>>, Query(query): Query<His
         return Ok(Json(json!({ "matches": matches })).into_response());
     }
     let history = match_service::extension_history(&state.context).await?;
-    Ok(Json(json!({ "matches": history.matches, "not_joblogged": history.not_joblogged })).into_response())
+    Ok(Json(json!({
+        "matches": history.matches,
+        "not_joblogged": history.not_joblogged,
+        "needs_status_update": history.needs_status_update,
+    }))
+    .into_response())
 }
 
 /// GET match/joblog/{id}: a saved match as an entry for Jobnet's joblog (joblog::read): its
@@ -69,16 +74,32 @@ pub struct JoblogStatusInput {
     id: serde_json::Value,
     status: serde_json::Value,
     logged: serde_json::Value,
+    /// Whether `status` now matches what is on Jobnet. Defaults to `logged` when omitted.
+    synced: serde_json::Value,
+    /// Jobnet's joblog card UUID when known.
+    external_id: Option<String>,
 }
 
-/// POST match/joblog_status {id, status, logged}: how far the candidate is with the job in
-/// Jobnet's words (joblog::SEARCH_STATUSES), and whether they have entered it in their Jobnet
-/// joblog. Answers {logged, at}: whether it is in the joblog now, and since when.
+/// POST match/joblog_status {id, status, logged, synced?, external_id?}: how far the candidate is
+/// with the job in Jobnet's words (joblog::SEARCH_STATUSES), and whether they have entered it in
+/// their Jobnet joblog. Answers {logged, at}: whether it is in the joblog now, and since when.
 pub async fn joblog_status(State(state): State<Arc<AppState>>, Json(input): Json<JoblogStatusInput>) -> Answer {
     // Anything but a known status's text is answered with the list of them.
     let status = input.status.as_str().unwrap_or("");
     let logged = input.logged == serde_json::Value::Bool(true);
-    let logged = match_service::save_joblog_status(&state.context, id_in_body(&input.id), status, logged).await?;
+    let synced = match input.synced {
+        serde_json::Value::Bool(synced) => synced,
+        _ => logged,
+    };
+    let logged = match_service::save_joblog_status_synced(
+        &state.context,
+        id_in_body(&input.id),
+        status,
+        logged,
+        synced,
+        input.external_id.as_deref(),
+    )
+    .await?;
     Ok(Json(json!({ "logged": logged.checked, "at": logged.at })).into_response())
 }
 

@@ -29,7 +29,17 @@ use super::{dates, match_score};
 
 /// Jobnet's choices, by the value its form posts.
 pub const JOB_TYPES: [(&str, &str); 2] = [("Fuldtid", "Fuldtid"), ("Deltid", "Deltid")];
-pub const SEARCH_STATUSES: [(&str, &str); 3] = [("IkkeSoegt", "Ikke søgt"), ("Soegt", "Søgt"), ("Samtale", "Samtale")];
+/// The three status radio options Jobnet's own "Opret/Rediger joblog" form accepts.
+pub const FORM_STATUSES: [(&str, &str); 3] = [("IkkeSoegt", "Ikke søgt"), ("Soegt", "Søgt"), ("Samtale", "Samtale")];
+/// All application statuses JobFinder tracks (Jobnet's three form statuses plus closed outcomes
+/// that tick Jobnet's "Afsluttet" checkbox on the joblog card).
+pub const SEARCH_STATUSES: [(&str, &str); 5] = [
+    ("IkkeSoegt", "Ikke søgt"),
+    ("Soegt", "Søgt"),
+    ("Samtale", "Samtale"),
+    ("Afslag", "Afslag"),
+    ("FaaetJob", "Fået job"),
+];
 pub const FOUND: [(&str, &str); 3] = [
     ("OpslaaetStilling", "Opslået stilling"),
     ("Uopfordret", "Uopfordret"),
@@ -45,6 +55,17 @@ pub const APPLIED: [(&str, &str); 3] = [
 pub const NOT_APPLIED: &str = "IkkeSoegt";
 /// The status a match gets when the candidate says they applied (Søgt).
 pub const APPLIED_STATUS: &str = "Soegt";
+
+/// The radio value Jobnet's "Opret/Rediger joblog" form takes for a JobFinder status.
+/// Closed outcomes (`Afslag`, `FaaetJob`) map to an applied radio value; on Jobnet's card they
+/// also tick the "Afsluttet" checkbox (`Lukket`).
+pub fn form_status(status: &str) -> &'static str {
+    match status {
+        "Samtale" | "FaaetJob" => "Samtale",
+        "Soegt" | "Afslag" => "Soegt",
+        _ => NOT_APPLIED,
+    }
+}
 
 // Jobnet's limits: part time is at most 36 hours, notes 2000 characters.
 pub const MAX_PART_TIME_HOURS: i64 = 36;
@@ -512,8 +533,8 @@ pub fn read(saved: &SavedMatch) -> Entry {
                     choice_field(
                         "searchStatus",
                         "Hvor langt er du med at søge dette job?",
-                        status,
-                        &SEARCH_STATUSES,
+                        form_status(status),
+                        &FORM_STATUSES,
                     ),
                     text_field(
                         "submissionDate",

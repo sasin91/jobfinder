@@ -72,14 +72,24 @@ async function call(path, options = {}) {
 async function answer(message) {
   if (message.type === "matches") {
     const path = message.shortlist ? "match/history?shortlist=true" : "match/history";
-    const { matches, not_joblogged } = await (await call(path)).json();
-    return { matches, not_joblogged: not_joblogged ?? [] };
+    const { matches, not_joblogged, needs_status_update } = await (await call(path)).json();
+    return {
+      matches,
+      not_joblogged: not_joblogged ?? [],
+      needs_status_update: needs_status_update ?? [],
+    };
   }
   if (message.type === "logged") {
     await call("match/joblog_status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: Number(message.id), status: message.status, logged: true }),
+      body: JSON.stringify({
+        id: Number(message.id),
+        status: message.status,
+        logged: true,
+        synced: message.synced ?? true,
+        external_id: message.external_id ?? null,
+      }),
     });
     return true;
   }

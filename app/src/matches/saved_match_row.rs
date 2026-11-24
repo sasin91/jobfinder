@@ -73,15 +73,20 @@ fn title(m: &ListedMatch) -> String {
 /// What has been done for the match: written application, résumé, applied, logged on Jobnet,
 /// rejected and why.
 fn done(m: &ListedMatch) -> Vec<String> {
-    let applied = m
-        .jobnet_status
-        .as_deref()
-        .is_some_and(|status| APPLIED_STATUSES.contains(&status));
+    let status = m.jobnet_status.as_deref();
+    let applied = status.is_some_and(|status| APPLIED_STATUSES.contains(&status));
     let mut done: Vec<String> = [
         ("application", m.has_application),
         ("résumé", m.has_resume),
         ("applied", applied),
+        ("samtale", status == Some("Samtale")),
+        ("afslag", status == Some("Afslag")),
+        ("fået job", status == Some("FaaetJob")),
         ("on Jobnet", m.jobnet_logged_at.is_some()),
+        (
+            "update on Jobnet",
+            m.jobnet_logged_at.is_some() && status.is_some() && m.jobnet_logged_status.as_deref() != status,
+        ),
     ]
     .into_iter()
     .filter(|(_, is)| *is)

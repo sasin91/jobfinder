@@ -82,6 +82,13 @@ pub struct Logged {
 
 impl JoblogPanel {
     pub fn from(id: i64, entry: &Entry) -> Self {
+        Self::from_status(id, entry, None)
+    }
+
+    /// Builds the panel for the Apply screen, using `actual_status` (when given) so JobFinder's
+    /// full status list (including `Afslag` and `Fået job`) is selectable even though Jobnet's
+    /// create form (`entry`) only carries the three `FORM_STATUSES` radio buttons.
+    pub fn from_status(id: i64, entry: &Entry, actual_status: Option<&str>) -> Self {
         JoblogPanel {
             id,
             sections: entry
@@ -89,7 +96,7 @@ impl JoblogPanel {
                 .iter()
                 .map(|section| PanelSection {
                     heading: section.heading,
-                    fields: section.fields.iter().map(field).collect(),
+                    fields: section.fields.iter().map(|f| field(f, actual_status)).collect(),
                 })
                 .collect(),
             files: entry.files.iter().map(file).collect(),
@@ -125,7 +132,7 @@ fn applied_on(entry: &Entry) -> String {
         .unwrap_or_default()
 }
 
-fn field(field: &Field) -> PanelField {
+fn field(field: &Field, actual_status: Option<&str>) -> PanelField {
     let choice = matches!(field.kind, "radio" | "checkbox");
     let choose = field.name == CHOOSE;
     let multiline = field.kind == "textarea";
@@ -145,7 +152,11 @@ fn field(field: &Field) -> PanelField {
         },
         choice,
         choose,
-        options: if choice { options(field) } else { Vec::new() },
+        options: if choice {
+            options(field, choose, actual_status)
+        } else {
+            Vec::new()
+        },
         left: multiline.then(|| joblog::MAX_NOTES.saturating_sub(value.chars().count())),
         value,
         multiline,
@@ -153,13 +164,27 @@ fn field(field: &Field) -> PanelField {
     }
 }
 
-fn options(field: &Field) -> Vec<PanelOption> {
+fn options(field: &Field, choose: bool, actual_status: Option<&str>) -> Vec<PanelOption> {
     if field.kind == "checkbox" {
         let ticked = field.value == Value::Ticked(true);
         return vec![
             option("yes", CHECKBOX_YES, ticked, "tick it".to_string()),
             option("no", CHECKBOX_NO, !ticked, "leave it unticked".to_string()),
         ];
+    }
+    if choose {
+        let chosen = actual_status.unwrap_or(field.value.text());
+        return joblog::SEARCH_STATUSES
+            .iter()
+            .map(|&(value, text)| {
+                let prompt = match value {
+                    "Afslag" => "choose \"Søgt\" and tick \"Afsluttet\" on the Jobnet card".to_string(),
+                    "FaaetJob" => "choose \"Samtale\" and tick \"Afsluttet\" on the Jobnet card".to_string(),
+                    _ => format!("choose \"{text}\""),
+                };
+                option(value, text, chosen == value, prompt)
+            })
+            .collect();
     }
     field
         .options

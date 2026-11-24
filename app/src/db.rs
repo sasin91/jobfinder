@@ -63,6 +63,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0019_match_feedback",
         include_str!("../migrations/0019_match_feedback.sql"),
     ),
+    (
+        "0020_joblog_logged_status",
+        include_str!("../migrations/0020_joblog_logged_status.sql"),
+    ),
 ];
 
 /// How long a write waits for another connection's write to finish, in milliseconds.

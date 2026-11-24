@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        SELECT status, external_id, applied_at, logged_at, updated_at\n        FROM match_integrations\n        WHERE match_id = ?1 AND integration = ?2\n        ",
+  "query": "\n        SELECT status, external_id, applied_at, logged_at, logged_status, updated_at\n        FROM match_integrations\n        WHERE match_id = ?1 AND integration = ?2\n        ",
   "describe": {
     "columns": [
       {
@@ -48,8 +48,19 @@
         }
       },
       {
-        "name": "updated_at",
+        "name": "logged_status",
         "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "logged_status"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 5,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -67,8 +78,9 @@
       true,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "46abb1b78815e48dbc11308d2784cf1c8eb8f66e07c7de16b276a3e2819070b6"
+  "hash": "55d5f219f26390fe9b2e38412f56084b6acc8f49e80dae1d7491eec46e3b6b2d"
 }

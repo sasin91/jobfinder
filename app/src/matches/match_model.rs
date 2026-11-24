@@ -64,7 +64,7 @@ const VERDICTS: [&str; 3] = ["met", "partial", "missing"];
 const NO_VERDICT_REASON: &str = "No verdict returned.";
 
 /// The Jobnet statuses that mean the candidate applied (joblog's APPLIED_STATUSES).
-pub const APPLIED_STATUSES: [&str; 2] = ["Soegt", "Samtale"];
+pub const APPLIED_STATUSES: [&str; 4] = ["Soegt", "Samtale", "Afslag", "FaaetJob"];
 
 /// The lists of saved matches by ?list=, each with its tab label and what the page says when it
 /// has none: the shortlist (top matches not applied for yet), all of them, applied for but not
@@ -119,6 +119,7 @@ pub struct Integration {
     pub external_id: Option<String>,
     pub applied_at: Option<i64>,
     pub logged_at: Option<i64>,
+    pub logged_status: Option<String>,
     pub updated_at: i64,
 }
 
@@ -230,6 +231,8 @@ pub struct ListedMatch {
     pub missed_disqualifier: Option<String>,
     pub jobnet_status: Option<String>,
     pub jobnet_logged_at: Option<i64>,
+    pub jobnet_logged_status: Option<String>,
+    pub jobnet_external_id: Option<String>,
     #[serde(skip)]
     pub rejected_at: Option<i64>,
     #[serde(skip)]
@@ -262,6 +265,8 @@ struct ListedRow {
     missed_disqualifier: Option<String>,
     jobnet_status: Option<String>,
     jobnet_logged_at: Option<i64>,
+    jobnet_logged_status: Option<String>,
+    jobnet_external_id: Option<String>,
     rejected_at: Option<i64>,
     deadline: Option<String>,
     closed_at: Option<i64>,
@@ -286,6 +291,8 @@ impl From<ListedRow> for ListedMatch {
             missed_disqualifier: row.missed_disqualifier,
             jobnet_status: row.jobnet_status,
             jobnet_logged_at: row.jobnet_logged_at,
+            jobnet_logged_status: row.jobnet_logged_status,
+            jobnet_external_id: row.jobnet_external_id,
             rejected_at: row.rejected_at,
             rejections: Vec::new(),
             opening: Opening {
@@ -410,6 +417,21 @@ pub async fn recent(db: &SqlitePool, limit: usize) -> sqlx::Result<Vec<ListedMat
     let rows = sqlx::query_file_as!(ListedRow, "queries/match_model/recent.sql", JOBNET_JOBLOG, limit)
         .fetch_all(db)
         .await?;
+    Ok(rows.into_iter().map(ListedMatch::from).collect())
+}
+
+/// Logged matches whose status changed in JobFinder since they were last synced on Jobnet,
+/// newest update first, for the Jobnet extension to update on jobnet.dk/joblog.
+pub async fn needs_status_update(db: &SqlitePool, limit: usize) -> sqlx::Result<Vec<ListedMatch>> {
+    let limit = limit.max(1) as i64;
+    let rows = sqlx::query_file_as!(
+        ListedRow,
+        "queries/match_model/needs_status_update.sql",
+        JOBNET_JOBLOG,
+        limit
+    )
+    .fetch_all(db)
+    .await?;
     Ok(rows.into_iter().map(ListedMatch::from).collect())
 }
 
@@ -940,7 +962,7 @@ pub async fn integration(db: &SqlitePool, id: i64, integration: &str) -> sqlx::R
     sqlx::query_as!(
         Integration,
         r#"
-        SELECT status, external_id, applied_at, logged_at, updated_at
+        SELECT status, external_id, applied_at, logged_at, logged_status, updated_at
         FROM match_integrations
         WHERE match_id = ?1 AND integration = ?2
         "#,
@@ -952,20 +974,28 @@ pub async fn integration(db: &SqlitePool, id: i64, integration: &str) -> sqlx::R
 }
 
 /// Saves a match's status in an outside service. `logged` says whether the candidate has
-/// entered it there; the first time keeps its date. The first applied status
-/// (APPLIED_STATUSES) keeps its date too (applied_at), through Søgt -> Samtale; any other status
-/// clears it.
+/// entered it there; the first time keeps its date. `synced` records that `status` now matches
+/// what is on the outside service (updating `logged_status`); when `synced` is false and the row
+/// is already logged, the prior `logged_status` is preserved so the extension knows an update is
+/// pending. `external_id` stores the outside service's entry identifier when known. The first
+/// applied status (APPLIED_STATUSES) keeps its date too (applied_at), through Søgt -> Samtale ->
+/// Afslag/Fået job; any other status clears it.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_integration(
     db: &SqlitePool,
     id: i64,
     integration: &str,
     status: &str,
     logged: bool,
+    synced: bool,
+    external_id: Option<&str>,
     now: i64,
 ) -> sqlx::Result<Option<Integration>> {
     let applied = APPLIED_STATUSES.contains(&status);
     let applied_at = applied.then_some(now);
     let logged_at = logged.then_some(now);
+    let synced_status = (logged && synced).then_some(status);
+    let external_id = external_id.map(str::trim).filter(|id| !id.is_empty());
     sqlx::query_file!(
         "queries/match_model/save_integration.sql",
         id,
@@ -975,7 +1005,10 @@ pub async fn save_integration(
         logged_at,
         now,
         applied,
-        logged
+        logged,
+        synced,
+        synced_status,
+        external_id
     )
     .execute(db)
     .await?;

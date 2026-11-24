@@ -1,0 +1,251 @@
+{
+  "db_name": "SQLite",
+  "query": "-- A batch of the user's saved matches in one list (LISTS), ordered by score or date saved.\n-- ?1 the integration the Jobnet joblog is kept under, ?2 the list,\n-- ?3 the applied statuses as a JSON array (APPLIED_STATUSES),\n-- ?4 ?5 ?6 the score, created_at and id of the row the batch comes after (all NULL for the first),\n-- ?7 how many, ?8 the sort order (0 best, 1 newest, 2 oldest), ?9 the search text.\n-- Selects what recent.sql selects, so both read into ListedRow.\nSELECT\n  m.id,\n  m.job_title,\n  m.company,\n  m.job_url,\n  COALESCE((\n    SELECT d.name\n    FROM match_documents md\n    JOIN documents d ON d.id = md.document_id AND d.kind = 'cv'\n    WHERE md.match_id = m.id\n  ), '') AS \"cv_name!: String\",\n  m.score,\n  m.points,\n  m.max_points,\n  m.tag,\n  EXISTS (\n    SELECT 1 FROM match_documents md JOIN documents d ON d.id = md.document_id\n    WHERE md.match_id = m.id AND d.kind = 'application'\n  ) AS \"has_application: bool\",\n  EXISTS (\n    SELECT 1 FROM match_documents md JOIN documents d ON d.id = md.document_id\n    WHERE md.match_id = m.id AND d.kind = 'resume'\n  ) AS \"has_resume: bool\",\n  m.created_at,\n  (\n    SELECT i.text\n    FROM match_items i\n    WHERE i.match_id = m.id AND i.criterion IN ('location', 'language', 'level') AND i.verdict = 'missing'\n    ORDER BY i.sort_order\n    LIMIT 1\n  ) AS missed_disqualifier,\n  j.status AS \"jobnet_status?\",\n  j.logged_at AS jobnet_logged_at,\n  j.logged_status AS \"jobnet_logged_status?\",\n  j.external_id AS \"jobnet_external_id?\",\n  m.rejected_at,\n  m.deadline,\n  m.closed_at,\n  m.closed_why\nFROM matches m\nLEFT JOIN match_integrations j ON j.match_id = m.id AND j.integration = ?1\nWHERE CASE ?2\n    -- The top and good ones not applied for yet, while they are open.\n    WHEN 'shortlist' THEN\n      m.rejected_at IS NULL\n      AND m.closed_at IS NULL\n      AND m.tag IN ('top', 'good')\n      AND (j.status IS NULL OR j.status NOT IN (SELECT value FROM json_each(?3)))\n      AND j.logged_at IS NULL\n    -- Applied for, but not yet entered in Jobnet's joblog.\n    WHEN 'not_joblogged' THEN\n      m.rejected_at IS NULL\n      AND j.status IN (SELECT value FROM json_each(?3))\n      AND j.logged_at IS NULL\n    -- Entered in Jobnet's joblog.\n    WHEN 'joblogged' THEN\n      m.rejected_at IS NULL\n      AND j.logged_at IS NOT NULL\n    -- The jobs that no longer take applications (matches::still_open).\n    WHEN 'closed' THEN\n      m.rejected_at IS NULL\n      AND m.closed_at IS NOT NULL\n    -- The ones the user rejected.\n    WHEN 'rejected' THEN\n      m.rejected_at IS NOT NULL\n    -- Every other list (All) leaves the rejected and the closed ones out.\n    ELSE\n      m.rejected_at IS NULL\n      AND m.closed_at IS NULL\n  END\n  AND (?9 = '' OR instr(lower(m.job_title), lower(?9)) > 0 OR instr(lower(m.company), lower(?9)) > 0)\n  AND (?6 IS NULL OR CASE ?8\n    WHEN 1 THEN (m.created_at, m.id) < (?5, ?6)\n    WHEN 2 THEN (m.created_at, m.id) > (?5, ?6)\n    ELSE (m.score, m.created_at, m.id) < (?4, ?5, ?6)\n  END)\nORDER BY\n  CASE WHEN ?8 = 0 THEN m.score END DESC,\n  CASE WHEN ?8 = 2 THEN m.created_at END ASC,\n  CASE WHEN ?8 = 2 THEN m.id END ASC,\n  m.created_at DESC,\n  m.id DESC\nLIMIT ?7\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "job_title",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "job_title"
+          }
+        }
+      },
+      {
+        "name": "company",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "company"
+          }
+        }
+      },
+      {
+        "name": "job_url",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "job_url"
+          }
+        }
+      },
+      {
+        "name": "cv_name!: String",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "name": "score",
+        "ordinal": 5,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "score"
+          }
+        }
+      },
+      {
+        "name": "points",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "points"
+          }
+        }
+      },
+      {
+        "name": "max_points",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "max_points"
+          }
+        }
+      },
+      {
+        "name": "tag",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "tag"
+          }
+        }
+      },
+      {
+        "name": "has_application: bool",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "has_resume: bool",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "missed_disqualifier",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_items",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "jobnet_status?",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "jobnet_logged_at",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "logged_at"
+          }
+        }
+      },
+      {
+        "name": "jobnet_logged_status?",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "logged_status"
+          }
+        }
+      },
+      {
+        "name": "jobnet_external_id?",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "external_id"
+          }
+        }
+      },
+      {
+        "name": "rejected_at",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "rejected_at"
+          }
+        }
+      },
+      {
+        "name": "deadline",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "deadline"
+          }
+        }
+      },
+      {
+        "name": "closed_at",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "closed_at"
+          }
+        }
+      },
+      {
+        "name": "closed_why",
+        "ordinal": 20,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "closed_why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "e2a704f516cd9b61bb52ad5648860551515eefb9893f2b3cfee027ed07591d66"
+}

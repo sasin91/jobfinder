@@ -257,6 +257,9 @@ pub struct ExtensionHistory {
     /// The ones applied for but not in Jobnet's joblog yet ("Applied, not on Jobnet yet"), best
     /// first, which the extension offers first.
     pub not_joblogged: Vec<ListedMatch>,
+    /// Already in Jobnet's joblog, whose status changed in JobFinder since it was last synced on
+    /// Jobnet (e.g. Søgt -> Afslag or Samtale), newest update first.
+    pub needs_status_update: Vec<ListedMatch>,
 }
 
 pub async fn application_shortlist(context: &Context) -> Result<Vec<ListedMatch>, ServiceError> {
@@ -270,6 +273,7 @@ pub async fn extension_history(context: &Context) -> Result<ExtensionHistory, Se
         not_joblogged: match_model::best_first(db, HISTORY_SIZE, "", "not_joblogged")
             .await?
             .rows,
+        needs_status_update: match_model::needs_status_update(db, HISTORY_SIZE).await?,
     })
 }
 
@@ -281,7 +285,8 @@ pub async fn joblog_entry(context: &Context, id: i64) -> Result<Entry, ServiceEr
 /// The same entry as the match prints it under the result.
 pub async fn joblog_panel(context: &Context, id: i64) -> Result<JoblogPanel, ServiceError> {
     let found = saved_match(context, id).await?;
-    Ok(JoblogPanel::from(found.id, &joblog::read(&found)))
+    let actual_status = found.jobnet_joblog.as_ref().map(|jobnet| jobnet.status.as_str());
+    Ok(JoblogPanel::from_status(found.id, &joblog::read(&found), actual_status))
 }
 
 /// Saves how far the candidate is with the job in Jobnet's words (joblog::SEARCH_STATUSES), and
@@ -292,6 +297,19 @@ pub async fn save_joblog_status(
     status: &str,
     logged: bool,
 ) -> Result<Logged, ServiceError> {
+    save_joblog_status_synced(context, id, status, logged, logged, None).await
+}
+
+/// Saves the match's joblog status with explicit control over whether `status` has been synced to
+/// Jobnet (`synced`) and Jobnet's card UUID (`external_id`).
+pub async fn save_joblog_status_synced(
+    context: &Context,
+    id: i64,
+    status: &str,
+    logged: bool,
+    synced: bool,
+    external_id: Option<&str>,
+) -> Result<Logged, ServiceError> {
     let found = saved_match(context, id).await?;
     if joblog::search_status(status).is_none() {
         let statuses: Vec<&str> = joblog::SEARCH_STATUSES.iter().map(|(_, text)| *text).collect();
@@ -301,7 +319,17 @@ pub async fn save_joblog_status(
         ));
     }
     let now = chrono::Utc::now().timestamp();
-    let saved = match_model::save_integration(context.db(), found.id, JOBNET_JOBLOG, status, logged, now).await?;
+    let saved = match_model::save_integration(
+        context.db(),
+        found.id,
+        JOBNET_JOBLOG,
+        status,
+        logged,
+        synced,
+        external_id,
+        now,
+    )
+    .await?;
     Ok(Logged::from(
         saved.as_ref().and_then(|saved| saved.logged_at),
         joblog::applied_on(saved.as_ref()),
@@ -316,8 +344,9 @@ pub struct Applied {
     pub applied_on: String,
 }
 
-/// Marks saved match id as applied for: Søgt, unless it is further along already (Samtale),
-/// keeping whether it is in the Jobnet joblog. Applied for once, it keeps the first day.
+/// Marks saved match id as applied for: Søgt, unless it is further along already (Samtale,
+/// Afslag, Fået job), keeping whether it is in the Jobnet joblog. Applied for once, it keeps the
+/// first day.
 pub async fn mark_applied(context: &Context, id: i64) -> Result<Applied, ServiceError> {
     let found = saved_match(context, id).await?;
     let saved = found.jobnet_joblog.as_ref();
@@ -327,7 +356,8 @@ pub async fn mark_applied(context: &Context, id: i64) -> Result<Applied, Service
         .unwrap_or(joblog::APPLIED_STATUS);
     let logged = saved.is_some_and(|saved| saved.logged_at.is_some());
     let now = chrono::Utc::now().timestamp();
-    let saved = match_model::save_integration(context.db(), found.id, JOBNET_JOBLOG, status, logged, now).await?;
+    let saved =
+        match_model::save_integration(context.db(), found.id, JOBNET_JOBLOG, status, logged, false, None, now).await?;
     Ok(Applied {
         status: joblog::search_status(status).unwrap_or(status).to_string(),
         applied_on: joblog::applied_on(saved.as_ref()),

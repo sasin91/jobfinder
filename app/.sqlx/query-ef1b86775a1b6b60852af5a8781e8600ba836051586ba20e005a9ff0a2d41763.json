@@ -1,0 +1,251 @@
+{
+  "db_name": "SQLite",
+  "query": "-- The user's newest saved matches not rejected, for the extension's history.\n-- ?1 the integration the Jobnet joblog is kept under, ?2 how many.\n-- Selects what best_first.sql selects, so both read into ListedRow.\nSELECT\n  m.id,\n  m.job_title,\n  m.company,\n  m.job_url,\n  COALESCE((\n    SELECT d.name\n    FROM match_documents md\n    JOIN documents d ON d.id = md.document_id AND d.kind = 'cv'\n    WHERE md.match_id = m.id\n  ), '') AS \"cv_name!: String\",\n  m.score,\n  m.points,\n  m.max_points,\n  m.tag,\n  EXISTS (\n    SELECT 1 FROM match_documents md JOIN documents d ON d.id = md.document_id\n    WHERE md.match_id = m.id AND d.kind = 'application'\n  ) AS \"has_application: bool\",\n  EXISTS (\n    SELECT 1 FROM match_documents md JOIN documents d ON d.id = md.document_id\n    WHERE md.match_id = m.id AND d.kind = 'resume'\n  ) AS \"has_resume: bool\",\n  m.created_at,\n  (\n    SELECT i.text\n    FROM match_items i\n    WHERE i.match_id = m.id AND i.criterion IN ('location', 'language', 'level') AND i.verdict = 'missing'\n    ORDER BY i.sort_order\n    LIMIT 1\n  ) AS missed_disqualifier,\n  j.status AS \"jobnet_status?\",\n  j.logged_at AS jobnet_logged_at,\n  j.logged_status AS \"jobnet_logged_status?\",\n  j.external_id AS \"jobnet_external_id?\",\n  m.rejected_at,\n  m.deadline,\n  m.closed_at,\n  m.closed_why\nFROM matches m\nLEFT JOIN match_integrations j ON j.match_id = m.id AND j.integration = ?1\nWHERE m.rejected_at IS NULL\nORDER BY m.created_at DESC, m.id DESC\nLIMIT ?2\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "job_title",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "job_title"
+          }
+        }
+      },
+      {
+        "name": "company",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "company"
+          }
+        }
+      },
+      {
+        "name": "job_url",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "job_url"
+          }
+        }
+      },
+      {
+        "name": "cv_name!: String",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "name": "score",
+        "ordinal": 5,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "score"
+          }
+        }
+      },
+      {
+        "name": "points",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "points"
+          }
+        }
+      },
+      {
+        "name": "max_points",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "max_points"
+          }
+        }
+      },
+      {
+        "name": "tag",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "tag"
+          }
+        }
+      },
+      {
+        "name": "has_application: bool",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "has_resume: bool",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "missed_disqualifier",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_items",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "jobnet_status?",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "jobnet_logged_at",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "logged_at"
+          }
+        }
+      },
+      {
+        "name": "jobnet_logged_status?",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "logged_status"
+          }
+        }
+      },
+      {
+        "name": "jobnet_external_id?",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "match_integrations",
+            "name": "external_id"
+          }
+        }
+      },
+      {
+        "name": "rejected_at",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "rejected_at"
+          }
+        }
+      },
+      {
+        "name": "deadline",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "deadline"
+          }
+        }
+      },
+      {
+        "name": "closed_at",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "closed_at"
+          }
+        }
+      },
+      {
+        "name": "closed_why",
+        "ordinal": 20,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "matches",
+            "name": "closed_why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "ef1b86775a1b6b60852af5a8781e8600ba836051586ba20e005a9ff0a2d41763"
+}

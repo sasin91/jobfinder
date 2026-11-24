@@ -320,6 +320,53 @@ async fn the_extension_marks_a_match_as_on_jobnet() {
         "30-10-2026".len()
     );
 
+    assert_eq!(history["needs_status_update"], serde_json::json!([]));
+
+    // Status changed in JobFinder (e.g. Afslag from email) while already logged on Jobnet:
+    // keeps logged_status = Samtale and surfaces under needs_status_update.
+    let (status, logged) = send_to(
+        &app,
+        post_json(
+            "/match/joblog_status",
+            r#"{"id": 21, "status": "Afslag", "logged": true, "synced": false}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{logged}");
+    let (_, history) = send_to(&app, get("/match/history")).await;
+    let history: serde_json::Value = serde_json::from_str(&history).unwrap();
+    assert_eq!(history["needs_status_update"][0]["id"], 21);
+    assert_eq!(history["needs_status_update"][0]["jobnet_status"], "Afslag");
+    assert_eq!(history["needs_status_update"][0]["jobnet_logged_status"], "Samtale");
+
+    // Jobnet's Opret/Rediger form entry maps Afslag -> Soegt while preserving applied_on.
+    let (_, entry) = send_to(&app, get("/match/joblog/21")).await;
+    let entry: serde_json::Value = serde_json::from_str(&entry).unwrap();
+    assert_eq!(entry["sections"][2]["fields"][0]["value"], "Soegt");
+    assert_eq!(
+        entry["sections"][2]["fields"][1]["value"].as_str().unwrap().len(),
+        "30-10-2026".len()
+    );
+
+    // Extension syncs the Afslag status on Jobnet and stores the card's UUID.
+    let sync_req = Request::post("/match/joblog_status")
+        .header(header::HOST, HOST)
+        .header(header::ORIGIN, EXTENSION)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"id": 21, "status": "Afslag", "logged": true, "synced": true, "external_id": "9cc69f03-7949-4689-8d63-d3a1754cd07c"}"#,
+        ))
+        .unwrap();
+    let (status, logged) = send_to(&app, sync_req).await;
+    assert_eq!(status, StatusCode::OK, "{logged}");
+    let (_, history) = send_to(&app, get("/match/history")).await;
+    let history: serde_json::Value = serde_json::from_str(&history).unwrap();
+    assert_eq!(history["needs_status_update"], serde_json::json!([]));
+    assert_eq!(
+        history["matches"][0]["jobnet_external_id"],
+        "9cc69f03-7949-4689-8d63-d3a1754cd07c"
+    );
+
     let (status, answer) = send_to(
         &app,
         post_json("/match/joblog_status", r#"{"id": 21, "status": "Done"}"#),
@@ -328,7 +375,7 @@ async fn the_extension_marks_a_match_as_on_jobnet() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         answer,
-        r#"{"error":"Pick one of Jobnet's statuses: Ikke søgt, Søgt, Samtale."}"#
+        r#"{"error":"Pick one of Jobnet's statuses: Ikke søgt, Søgt, Samtale, Afslag, Fået job."}"#
     );
     let (status, _) = send_to(
         &app,

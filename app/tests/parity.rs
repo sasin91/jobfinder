@@ -324,6 +324,7 @@ fn integration(case: &Value) -> Option<Integration> {
         external_id: None,
         applied_at: case["applied_at"].as_i64(),
         logged_at: case["logged_at"].as_i64(),
+        logged_status: None,
         updated_at: 0,
     })
 }

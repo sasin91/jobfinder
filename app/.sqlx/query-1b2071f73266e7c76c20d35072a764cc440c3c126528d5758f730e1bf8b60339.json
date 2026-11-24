@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "-- Saves a match's status in an outside service. ?1 the match, ?2 the integration, ?3 the status,\n-- ?4 when it was applied for (NULL unless ?3 is an applied status), ?5 when it was logged there\n-- (NULL unless it is), ?6 now, ?7 whether ?3 is an applied status, ?8 whether it is logged,\n-- ?9 whether ?3 was synced to the outside service now, ?10 the synced status (NULL unless ?9),\n-- ?11 the outside service's entry id when known (kept when NULL).\n-- The first applied status and the first time logged keep their dates; any other status clears\n-- applied_at. Unlogging clears logged_at and logged_status; changing status without syncing keeps\n-- the previous logged_status so the extension knows Jobnet needs an update.\nINSERT INTO match_integrations\n  (match_id, integration, status, external_id, applied_at, logged_at, logged_status, created_at, updated_at)\nVALUES (?1, ?2, ?3, ?11, ?4, ?5, CASE WHEN ?8 AND ?9 THEN ?10 ELSE NULL END, ?6, ?6)\nON CONFLICT (match_id, integration) DO UPDATE SET\n  status = excluded.status,\n  external_id = COALESCE(excluded.external_id, external_id),\n  updated_at = excluded.updated_at,\n  applied_at = CASE WHEN ?7 THEN COALESCE(applied_at, excluded.applied_at) END,\n  logged_at = CASE WHEN ?8 THEN COALESCE(logged_at, excluded.logged_at) END,\n  logged_status = CASE\n    WHEN NOT ?8 THEN NULL\n    WHEN ?9 THEN ?10\n    ELSE logged_status\n  END\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "1b2071f73266e7c76c20d35072a764cc440c3c126528d5758f730e1bf8b60339"
+}

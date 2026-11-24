@@ -454,11 +454,11 @@ async fn save_change(
     change: Change,
 ) -> Result<(&'static str, Logged), String> {
     let saved = match_service::joblog_panel(context, id).await.map_err(|e| e.message)?;
-    let (status, logged) = match change {
-        Change::Status(status) => (status, saved.logged.checked),
-        Change::Logged(logged) => (saved_status(&saved), logged),
+    let (status, logged, synced) = match change {
+        Change::Status(status) => (status, saved.logged.checked, false),
+        Change::Logged(logged) => (saved_status(&saved), logged, logged),
     };
-    let logged = match_service::save_joblog_status(context, id, status, logged)
+    let logged = match_service::save_joblog_status_synced(context, id, status, logged, synced, None)
         .await
         .map_err(|e| e.message)?;
     Ok((status, logged))
